@@ -279,8 +279,34 @@ enum Commands {
     /// List commits for an unstable channel in reverse chronological order
     List { channel: String },
 
+    /// Use binary search to find the newest historical commit of a channel before a bug
+    Bisect {
+        #[command(subcommand)]
+        bisect: Bisect,
+    },
+
     /// Generate JSON files for unstable channel commits before the most recent release
     History { dir: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum Bisect {
+    /// Start bisecting in this directory
+    Start,
+
+    /// Mark this commit as "bad"
+    #[command(visible_alias = "new")]
+    Bad,
+
+    /// Mark this commit as "good"
+    #[command(visible_alias = "old")]
+    Good,
+
+    /// Delete bisection state for this directory
+    Reset,
+
+    /// Mark commits as "good" iff a command exits with code 0
+    Run { cmd: String, args: Vec<String> },
 }
 
 #[tokio::main]
@@ -406,6 +432,13 @@ async fn main() -> anyhow::Result<()> {
             child.wait()?;
             Ok(())
         }
+        (Ok(_), Commands::Bisect { bisect }) => match bisect {
+            Bisect::Start => todo!(),
+            Bisect::Good => todo!(),
+            Bisect::Bad => todo!(),
+            Bisect::Reset => todo!(),
+            Bisect::Run { cmd: _, args: _ } => todo!(),
+        },
         (Ok(cache), Commands::History { dir }) => {
             let remote = Remote::new(cache).await;
             for channel in Channel::iter() {

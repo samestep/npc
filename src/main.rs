@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, Stdio},
     time::Duration,
 };
@@ -64,83 +64,99 @@ fn cache_dir() -> anyhow::Result<PathBuf> {
         .join(NAME))
 }
 
-fn git_clone() -> anyhow::Result<PathBuf> {
-    let repo = "https://github.com/NixOS/nixpkgs.git";
-    let dir = cache_dir()?.join("nixpkgs.git");
-    if fs::exists(&dir)? {
-        let output = Command::new(GIT)
-            .arg("-C")
-            .arg(&dir)
-            .args(["remote", "--verbose"])
-            .stderr(Stdio::inherit())
+fn cached(channel: &str) -> IndexMap<String, String> {
+    let Ok(dir) = cache_dir() else {
+        return Default::default();
+    };
+    let Ok(json) = fs::read_to_string(dir.join(format!("{channel}.json"))) else {
+        return Default::default();
+    };
+    serde_json::from_str(&json).unwrap_or_default()
+}
+
+struct Clone {
+    dir: PathBuf,
+}
+
+impl Clone {
+    fn new() -> anyhow::Result<Self> {
+        let repo = "https://github.com/NixOS/nixpkgs.git";
+        let dir = cache_dir()?.join("nixpkgs.git");
+        if fs::exists(&dir)? {
+            let output = Command::new(GIT)
+                .arg("-C")
+                .arg(&dir)
+                .args(["remote", "--verbose"])
+                .stderr(Stdio::inherit())
+                .output()?;
+            if !output.status.success() {
+                bail!("failed to list Git remotes in {}", dir.display());
+            }
+            if str::from_utf8(&output.stdout)? != REMOTES {
+                bail!("unexpected Git remotes in {}", dir.display())
+            }
+        } else {
+            eprintln!("Cloning {repo} which will use several gigabytes of disk space.");
+            let status = Command::new(GIT)
+                .args(["clone", "--mirror", repo])
+                .arg(&dir)
+                .status()?;
+            if !status.success() {
+                bail!("failed to clone {repo}");
+            }
+        }
+        Ok(Self { dir })
+    }
+
+    fn git(&self) -> Command {
+        let mut cmd = Command::new(GIT);
+        cmd.arg("-C").arg(&self.dir);
+        cmd
+    }
+
+    fn commit_date(&self, sha: &str) -> anyhow::Result<String> {
+        let output = self
+            .git()
+            .args([
+                "show",
+                "--no-patch",
+                "--date=iso-local",
+                "--format=%cd",
+                sha,
+            ])
             .output()?;
         if !output.status.success() {
-            bail!("failed to list Git remotes in {}", dir.display());
+            bail!("failed to show Git commit date");
         }
-        if str::from_utf8(&output.stdout)? != REMOTES {
-            bail!("unexpected Git remotes in {}", dir.display())
+        let mut date = String::from_utf8(output.stdout)?;
+        if date.pop() != Some('\n') {
+            bail!("expected trailing newline from `git show`");
         }
-        Ok(dir)
-    } else {
-        eprintln!("Cloning {repo} which will use several gigabytes of disk space.");
-        let status = Command::new(GIT)
-            .args(["clone", "--mirror", repo])
-            .arg(&dir)
-            .status()?;
-        if !status.success() {
-            bail!("failed to clone {repo}");
-        }
-        Ok(dir)
+        Ok(date)
     }
-}
-
-fn commit_date(clone: &Path, sha: &str) -> anyhow::Result<Option<String>> {
-    let output = Command::new(GIT)
-        .arg("-C")
-        .arg(clone)
-        .args([
-            "show",
-            "--no-patch",
-            "--date=iso-local",
-            "--format=%cd",
-            sha,
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let mut date = String::from_utf8(output.stdout)?;
-    Ok(if output.status.success() && date.pop() == Some('\n') {
-        Some(date)
-    } else {
-        None
-    })
-}
-
-async fn s3_client() -> s3::Client {
-    // We use `no_credentials` to avoid authenticating because it's a public bucket.
-    let config = aws_config::defaults(BehaviorVersion::latest())
-        .no_credentials()
-        .region(REGION)
-        .load()
-        .await;
-    s3::Client::new(&config)
 }
 
 struct Remote {
-    clone: PathBuf,
+    clone: Clone,
     s3: s3::Client,
 }
 
 impl Remote {
+    async fn new(clone: Clone) -> Self {
+        // We use `no_credentials` to avoid authenticating because it's a public bucket.
+        let config = aws_config::defaults(BehaviorVersion::latest())
+            .no_credentials()
+            .region(REGION)
+            .load()
+            .await;
+        let s3 = s3::Client::new(&config);
+        Self { clone, s3 }
+    }
+
     async fn git_revision(&self, prefix: &str) -> anyhow::Result<String> {
         let dot = prefix.rfind(".").ok_or_else(|| anyhow!("no dot"))?;
         let short = &prefix[dot + 1..prefix.len() - 1];
-        let output = Command::new(GIT)
-            .arg("-C")
-            .arg(&self.clone)
-            .args(["rev-parse", short])
-            .output()?;
+        let output = self.clone.git().args(["rev-parse", short]).output()?;
         if output.status.success() {
             let mut sha = String::from_utf8(output.stdout)?;
             if sha.pop() != Some('\n') {
@@ -186,6 +202,26 @@ impl Remote {
         }
         Ok(())
     }
+
+    async fn channel_json(
+        &self,
+        channel: &'static str,
+        releases: impl IntoIterator<Item = &str>,
+    ) -> anyhow::Result<String> {
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_message(channel);
+        spinner.enable_steady_tick(Duration::from_millis(100));
+        let mut pairs = IndexMap::new();
+        self.list_revisions(channel, releases, |prefix, sha| {
+            pairs.insert(prefix, sha);
+            spinner.set_message(format!("{channel}: {} commits", pairs.len()));
+        })
+        .await?;
+        let mut json = serde_json::to_string_pretty(&pairs)?;
+        json.push('\n');
+        spinner.finish();
+        Ok(json)
+    }
 }
 
 #[derive(Parser)]
@@ -196,7 +232,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Update local Git clone of Nixpkgs
+    /// Update local cache and Git clone of Nixpkgs
     Fetch,
 
     /// List commits for an unstable channel in reverse chronological order
@@ -209,55 +245,41 @@ enum Commands {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
-    let clone = git_clone()?;
+    // We parse CLI args before checking the Git clone to allow early exit for `--help`.
+    let clone = Clone::new()?;
     match args.command {
         Commands::Fetch => {
-            let status = Command::new(GIT)
-                .arg("-C")
-                .arg(clone)
-                .arg("fetch")
-                .status()?;
+            let remote = Remote::new(clone).await;
+            let dir = cache_dir()?;
+            for channel in UNSTABLE_CHANNELS {
+                let json = remote.channel_json(channel, [NEXT_RELEASE]).await?;
+                fs::write(dir.join(format!("{channel}.json")), json)?;
+            }
+            // We fetch from Git after fetching from S3 so that, once we're done, all the commit
+            // hashes we got from S3 should also be in our local Git clone.
+            let status = remote.clone.git().arg("fetch").status()?;
             if !status.success() {
                 bail!("failed to fetch from Git");
             }
             Ok(())
         }
         Commands::List { channel } => {
-            let s3 = s3_client().await;
-            let remote = Remote { clone, s3 };
-            let mut pairs: IndexMap<String, String> =
-                serde_json::from_str(unstable_channel_history(&channel).unwrap())?;
-            remote
-                .list_revisions(&channel, [NEXT_RELEASE], |prefix, sha| {
-                    pairs.insert(prefix, sha);
-                })
-                .await?;
-            for sha in pairs.values().rev() {
-                match commit_date(&remote.clone, sha)? {
-                    Some(date) => println!("{sha} {date}"),
-                    None => println!("{sha} not found locally; consider running `{NAME} fetch`"),
-                }
+            let history: IndexMap<String, String> =
+                serde_json::from_str(unstable_channel_history(&channel).unwrap()).unwrap();
+            let current = cached(&channel);
+            for sha in history.values().chain(current.values()).rev() {
+                let date = clone.commit_date(sha)?;
+                println!("{sha} {date}");
             }
             Ok(())
         }
         Commands::History { dir } => {
-            let s3 = s3_client().await;
-            let remote = Remote { clone, s3 };
+            let remote = Remote::new(clone).await;
             for channel in UNSTABLE_CHANNELS {
-                let spinner = ProgressBar::new_spinner();
-                spinner.set_message(*channel);
-                spinner.enable_steady_tick(Duration::from_millis(100));
-                let mut pairs = IndexMap::new();
-                remote
-                    .list_revisions(channel, RELEASES.iter().copied(), |prefix, sha| {
-                        pairs.insert(prefix, sha);
-                        spinner.set_message(format!("{channel}: {} commits", pairs.len()));
-                    })
+                let json = remote
+                    .channel_json(channel, RELEASES.iter().copied())
                     .await?;
-                let mut json = serde_json::to_string_pretty(&pairs)?;
-                json.push('\n');
                 fs::write(dir.join(format!("{channel}.json")), json)?;
-                spinner.finish();
             }
             Ok(())
         }

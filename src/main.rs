@@ -178,6 +178,12 @@ impl Cache {
         cmd.arg("-C").arg(self.dir.join(CacheKey::Git.name()));
         cmd
     }
+
+    fn channel(&self, channel: Channel) -> anyhow::Result<IndexMap<String, String>> {
+        Ok(serde_json::from_str(&fs::read_to_string(
+            self.dir.join(channel.key().name()),
+        )?)?)
+    }
 }
 
 struct Remote {
@@ -348,16 +354,45 @@ async fn main() -> anyhow::Result<()> {
             bail!("cache missing; please run `{NAME} fetch`");
         }
         (Ok(cache), Commands::Status) => {
-            println!("current local time is {}", now());
-            println!("last fetched cache at {}", cache.last_fetched);
+            let width = 21;
+            let message1 = "current local time is";
+            let message2 = "last fetched cache at";
+            assert_eq!(message1.len(), width);
+            assert_eq!(message2.len(), width);
+            println!("{message1} {}", now());
+            println!("{message2} {}", cache.last_fetched);
+            println!();
+            for channel in Channel::iter() {
+                let name: &str = channel.into();
+                assert!(name.len() <= width);
+                match cache.channel(channel)?.last() {
+                    None => println!("{name}"),
+                    Some((_, sha)) => {
+                        let output = cache
+                            .git()
+                            .args([
+                                "show",
+                                "--no-patch",
+                                "--date=iso-local",
+                                "--format=%cd",
+                                sha,
+                            ])
+                            .output()?;
+                        if !output.status.success() {
+                            bail!("failed to show Git commit date");
+                        }
+                        let date = trim_newline(String::from_utf8(output.stdout)?)?;
+                        println!("{name:<width$} {date}");
+                    }
+                }
+            }
             Ok(())
         }
         (Ok(cache), Commands::List { channel }) => {
             let channel = Channel::from_str(&channel)?;
             let history: IndexMap<String, String> =
                 serde_json::from_str(channel.history()).unwrap();
-            let current: IndexMap<String, String> =
-                serde_json::from_str(&fs::read_to_string(cache.dir.join(channel.key().name()))?)?;
+            let current = cache.channel(channel)?;
             let mut child = cache
                 .git()
                 .args([

@@ -285,7 +285,7 @@ enum Commands {
     /// Delete the cache
     Clean,
 
-    /// Print the status of the cache
+    /// Print the status of all channels in the cache
     Status,
 
     /// List commits for an unstable channel in reverse chronological order

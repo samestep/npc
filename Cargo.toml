@@ -11,7 +11,6 @@ aws-sdk-s3 = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
-enumset = "1"
 indexmap = { version = "2", features = ["serde"] }
 indicatif = "0.18"
 serde_json = "1"

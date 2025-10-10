@@ -11,7 +11,6 @@ use anyhow::{Context, anyhow, bail};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3 as s3;
 use clap::{Parser, Subcommand};
-use enumset::{EnumSet, EnumSetType};
 use indexmap::IndexMap;
 use indicatif::ProgressBar;
 use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
@@ -54,27 +53,6 @@ fn now() -> String {
         .to_string()
 }
 
-#[derive(EnumSetType)]
-enum CacheKey {
-    LastFetched,
-    Git,
-    NixosUnstable,
-    NixosUnstableSmall,
-    NixpkgsUnstable,
-}
-
-impl CacheKey {
-    fn name(self) -> &'static str {
-        match self {
-            Self::LastFetched => "last-fetched.txt",
-            Self::Git => "nixpkgs.git",
-            Self::NixosUnstable => "nixos-unstable.json",
-            Self::NixosUnstableSmall => "nixos-unstable-small.json",
-            Self::NixpkgsUnstable => "nixpkgs-unstable.json",
-        }
-    }
-}
-
 #[derive(Clone, Copy, EnumIter, EnumString, IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
 enum Channel {
@@ -102,17 +80,29 @@ impl Channel {
     }
 
     fn key(self) -> CacheKey {
+        CacheKey::Channel(self)
+    }
+}
+
+enum CacheKey {
+    LastFetched,
+    Git,
+    Channel(Channel),
+}
+
+impl CacheKey {
+    fn name(self) -> String {
         match self {
-            Self::NixosUnstable => CacheKey::NixosUnstable,
-            Self::NixosUnstableSmall => CacheKey::NixosUnstableSmall,
-            Self::NixpkgsUnstable => CacheKey::NixpkgsUnstable,
+            Self::LastFetched => "last-fetched.txt".to_owned(),
+            Self::Git => "nixpkgs.git".to_owned(),
+            Self::Channel(channel) => format!("{}.json", <&str>::from(channel)),
         }
     }
 }
 
 struct PartialCache {
     dir: PathBuf,
-    missing: EnumSet<CacheKey>,
+    missing_git: bool,
 }
 
 struct Cache {
@@ -122,7 +112,8 @@ struct Cache {
 
 impl Cache {
     fn new(dir: PathBuf) -> anyhow::Result<Result<Self, PartialCache>> {
-        let mut missing = EnumSet::empty();
+        let mut missing_git = false;
+        let mut missing_other = false;
 
         let last_fetched = match fs::read_to_string(dir.join(CacheKey::LastFetched.name())) {
             Ok(datetime) => Some(trim_newline(datetime)?),
@@ -132,7 +123,7 @@ impl Cache {
             },
         };
         if last_fetched.is_none() {
-            missing.insert(CacheKey::LastFetched);
+            missing_other = true;
         }
 
         let git_dir = dir.join(CacheKey::Git.name());
@@ -150,23 +141,23 @@ impl Cache {
                 bail!("unexpected Git remotes in {}", git_dir.display())
             }
         } else {
-            missing.insert(CacheKey::Git);
+            missing_git = true;
         }
 
         for channel in Channel::iter() {
             let key = channel.key();
             if !fs::exists(dir.join(key.name()))? {
-                missing.insert(key);
+                missing_other = true;
             }
         }
 
-        if missing.is_empty() {
+        if missing_git || missing_other {
+            Ok(Err(PartialCache { dir, missing_git }))
+        } else {
             Ok(Ok(Self {
                 dir,
                 last_fetched: last_fetched.unwrap(),
             }))
-        } else {
-            Ok(Err(PartialCache { dir, missing }))
         }
     }
 
@@ -317,9 +308,9 @@ async fn main() -> anyhow::Result<()> {
                     cache.last_fetched = last_fetched;
                     cache
                 }
-                Err(PartialCache { dir, missing }) => {
+                Err(PartialCache { dir, missing_git }) => {
                     let cache = Cache { dir, last_fetched };
-                    if missing.contains(CacheKey::Git) {
+                    if missing_git {
                         let repo = "https://github.com/NixOS/nixpkgs.git";
                         let status = Command::new(GIT)
                             .args(["clone", "--mirror", repo])

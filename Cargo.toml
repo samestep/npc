@@ -1,0 +1,12 @@
+[package]
+name = "nixpkgs"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+aws-config = "1"
+aws-sdk-s3 = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }

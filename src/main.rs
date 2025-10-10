@@ -37,6 +37,17 @@ const RELEASES: &[&str] = &[
     "21.05", "21.11", "22.05", "22.11", "23.05", "23.11", "24.05", "24.11", "25.05",
 ];
 
+const NEXT_RELEASE: &str = "25.11";
+
+fn unstable_channel_history(channel: &str) -> Option<&'static str> {
+    match channel {
+        "nixos-unstable" => Some(include_str!("nixos-unstable.json")),
+        "nixos-unstable-small" => Some(include_str!("nixos-unstable-small.json")),
+        "nixpkgs-unstable" => Some(include_str!("nixpkgs-unstable.json")),
+        _ => None,
+    }
+}
+
 fn unstable_channel_prefix(channel: &str, release: &str) -> String {
     let prefix = match channel {
         "nixos-unstable" => "nixos/unstable/nixos",
@@ -162,6 +173,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Update local Git clone of Nixpkgs
+    Fetch,
+
+    /// List commits for an unstable channel in reverse chronological order
+    List { channel: String },
+
     /// Generate JSON files for unstable channel commits before the most recent release
     History { dir: PathBuf },
 }
@@ -171,6 +188,51 @@ async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
     let clone = git_clone()?;
     match args.command {
+        Commands::Fetch => {
+            let status = Command::new(GIT)
+                .arg("-C")
+                .arg(clone)
+                .arg("fetch")
+                .status()?;
+            if !status.success() {
+                bail!("failed to fetch from Git");
+            }
+            Ok(())
+        }
+        Commands::List { channel } => {
+            let s3 = s3_client().await;
+            let remote = Remote { clone, s3 };
+            let mut pairs: IndexMap<String, String> =
+                serde_json::from_str(unstable_channel_history(&channel).unwrap())?;
+            remote
+                .list_revisions(&channel, [NEXT_RELEASE], |prefix, sha| {
+                    pairs.insert(prefix, sha);
+                })
+                .await?;
+            for sha in pairs.values().rev() {
+                let output = Command::new(GIT)
+                    .arg("-C")
+                    .arg(&remote.clone)
+                    .args([
+                        "show",
+                        "--no-patch",
+                        "--date=iso-local",
+                        "--format=%cd",
+                        sha,
+                    ])
+                    .stderr(Stdio::inherit())
+                    .output()?;
+                if !output.status.success() {
+                    bail!("failed to show Git commit date");
+                }
+                let mut date = String::from_utf8(output.stdout)?;
+                if date.pop() != Some('\n') {
+                    bail!("expected trailing newline from `git show`");
+                }
+                println!("{sha} {date}");
+            }
+            Ok(())
+        }
         Commands::History { dir } => {
             let s3 = s3_client().await;
             let remote = Remote { clone, s3 };

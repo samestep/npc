@@ -300,7 +300,7 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("no cache directory"))?
         .join(format!("nix-{NAME}"));
     if let Commands::Clean = args.command {
-        fs::remove_file(cache_dir.join(CacheKey::LastFetched.name()))?;
+        fs::remove_dir_all(cache_dir)?;
         return Ok(());
     }
     // We checked for the `clean` subcommand first since it must still work if the cache is broken.

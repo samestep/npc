@@ -17,7 +17,7 @@ use indicatif::ProgressBar;
 use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
 /// The name of this program.
-const NAME: &str = "nixpkgs";
+const NAME: &str = env!("CARGO_PKG_NAME");
 
 const GIT: &str = "git";
 
@@ -124,7 +124,7 @@ impl Cache {
     fn new() -> anyhow::Result<Result<Self, PartialCache>> {
         let dir = dirs::cache_dir()
             .ok_or_else(|| anyhow!("no cache directory"))?
-            .join(NAME);
+            .join(format!("nix-{NAME}"));
         let mut missing = EnumSet::empty();
 
         let last_fetched = match fs::read_to_string(dir.join(CacheKey::LastFetched.name())) {

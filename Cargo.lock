@@ -1758,7 +1758,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "nixpkgs"
+name = "nom"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+dependencies = [
+ "memchr",
+ "minimal-lexical",
+]
+
+[[package]]
+name = "npc"
 version = "0.0.0"
 dependencies = [
  "anyhow",
@@ -1773,16 +1783,6 @@ dependencies = [
  "serde_json",
  "strum",
  "tokio",
-]
-
-[[package]]
-name = "nom"
-version = "7.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
-dependencies = [
- "memchr",
- "minimal-lexical",
 ]
 
 [[package]]

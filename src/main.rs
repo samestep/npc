@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
 };
@@ -92,6 +92,29 @@ fn git_clone() -> anyhow::Result<PathBuf> {
         }
         Ok(dir)
     }
+}
+
+fn commit_date(clone: &Path, sha: &str) -> anyhow::Result<Option<String>> {
+    let output = Command::new(GIT)
+        .arg("-C")
+        .arg(clone)
+        .args([
+            "show",
+            "--no-patch",
+            "--date=iso-local",
+            "--format=%cd",
+            sha,
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let mut date = String::from_utf8(output.stdout)?;
+    Ok(if output.status.success() && date.pop() == Some('\n') {
+        Some(date)
+    } else {
+        None
+    })
 }
 
 async fn s3_client() -> s3::Client {
@@ -210,26 +233,10 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await?;
             for sha in pairs.values().rev() {
-                let output = Command::new(GIT)
-                    .arg("-C")
-                    .arg(&remote.clone)
-                    .args([
-                        "show",
-                        "--no-patch",
-                        "--date=iso-local",
-                        "--format=%cd",
-                        sha,
-                    ])
-                    .stderr(Stdio::inherit())
-                    .output()?;
-                if !output.status.success() {
-                    bail!("failed to show Git commit date");
+                match commit_date(&remote.clone, sha)? {
+                    Some(date) => println!("{sha} {date}"),
+                    None => println!("{sha} not found locally; consider running `{NAME} fetch`"),
                 }
-                let mut date = String::from_utf8(output.stdout)?;
-                if date.pop() != Some('\n') {
-                    bail!("expected trailing newline from `git show`");
-                }
-                println!("{sha} {date}");
             }
             Ok(())
         }

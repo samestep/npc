@@ -8,9 +8,12 @@ edition = "2024"
 anyhow = "1"
 aws-config = "1"
 aws-sdk-s3 = "1"
+chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+enumset = "1"
 indexmap = { version = "2", features = ["serde"] }
 indicatif = "0.18"
 serde_json = "1"
+strum = { version = "0.27", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }

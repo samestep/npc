@@ -1,8 +1,9 @@
 use std::{
     fs,
-    io::Write,
+    io::{self, Write},
     path::PathBuf,
     process::{Command, Stdio},
+    str::FromStr,
     time::Duration,
 };
 
@@ -10,8 +11,10 @@ use anyhow::{anyhow, bail};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3 as s3;
 use clap::{Parser, Subcommand};
+use enumset::{EnumSet, EnumSetType};
 use indexmap::IndexMap;
 use indicatif::ProgressBar;
+use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
 /// The name of this program.
 const NAME: &str = "nixpkgs";
@@ -30,8 +33,6 @@ const BUCKET: &str = "nix-releases";
 // This command can be used to check: `curl --head https://nix-releases.s3.amazonaws.com/`
 const REGION: Region = Region::from_static("eu-west-1");
 
-const UNSTABLE_CHANNELS: &[&str] = &["nixos-unstable", "nixos-unstable-small", "nixpkgs-unstable"];
-
 // We exclude everything earlier because the bucket does not have `git-revision` objects for those.
 const RELEASES: &[&str] = &[
     "16.09", "17.03", "17.09", "18.03", "18.09", "19.03", "19.09", "20.03", "20.09", "21.03",
@@ -40,89 +41,152 @@ const RELEASES: &[&str] = &[
 
 const NEXT_RELEASE: &str = "25.11";
 
-fn unstable_channel_history(channel: &str) -> Option<&'static str> {
-    match channel {
-        "nixos-unstable" => Some(include_str!("nixos-unstable.json")),
-        "nixos-unstable-small" => Some(include_str!("nixos-unstable-small.json")),
-        "nixpkgs-unstable" => Some(include_str!("nixpkgs-unstable.json")),
-        _ => None,
+fn trim_newline(mut string: String) -> anyhow::Result<String> {
+    if string.pop() != Some('\n') {
+        bail!("expected trailing newline");
+    }
+    Ok(string)
+}
+
+fn now() -> String {
+    chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S %z")
+        .to_string()
+}
+
+#[derive(EnumSetType)]
+enum CacheKey {
+    LastFetched,
+    Git,
+    NixosUnstable,
+    NixosUnstableSmall,
+    NixpkgsUnstable,
+}
+
+impl CacheKey {
+    fn name(self) -> &'static str {
+        match self {
+            Self::LastFetched => "last-fetched.txt",
+            Self::Git => "nixpkgs.git",
+            Self::NixosUnstable => "nixos-unstable.json",
+            Self::NixosUnstableSmall => "nixos-unstable-small.json",
+            Self::NixpkgsUnstable => "nixpkgs-unstable.json",
+        }
     }
 }
 
-fn unstable_channel_prefix(channel: &str, release: &str) -> String {
-    let prefix = match channel {
-        "nixos-unstable" => "nixos/unstable/nixos",
-        "nixos-unstable-small" => "nixos/unstable-small/nixos",
-        "nixpkgs-unstable" => "nixpkgs/nixpkgs",
-        _ => unimplemented!("{channel}"),
-    };
-    format!("{prefix}-{release}pre")
+#[derive(Clone, Copy, EnumIter, EnumString, IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
+enum Channel {
+    NixosUnstable,
+    NixosUnstableSmall,
+    NixpkgsUnstable,
 }
 
-fn cache_dir() -> anyhow::Result<PathBuf> {
-    Ok(dirs::cache_dir()
-        .ok_or_else(|| anyhow!("no cache directory"))?
-        .join(NAME))
+impl Channel {
+    fn history(self) -> &'static str {
+        match self {
+            Self::NixosUnstable => include_str!("nixos-unstable.json"),
+            Self::NixosUnstableSmall => include_str!("nixos-unstable-small.json"),
+            Self::NixpkgsUnstable => include_str!("nixpkgs-unstable.json"),
+        }
+    }
+
+    fn prefix(self, release: &str) -> String {
+        let prefix = match self {
+            Self::NixosUnstable => "nixos/unstable/nixos",
+            Self::NixosUnstableSmall => "nixos/unstable-small/nixos",
+            Self::NixpkgsUnstable => "nixpkgs/nixpkgs",
+        };
+        format!("{prefix}-{release}pre")
+    }
+
+    fn key(self) -> CacheKey {
+        match self {
+            Self::NixosUnstable => CacheKey::NixosUnstable,
+            Self::NixosUnstableSmall => CacheKey::NixosUnstableSmall,
+            Self::NixpkgsUnstable => CacheKey::NixpkgsUnstable,
+        }
+    }
 }
 
-fn cached(channel: &str) -> IndexMap<String, String> {
-    let Ok(dir) = cache_dir() else {
-        return Default::default();
-    };
-    let Ok(json) = fs::read_to_string(dir.join(format!("{channel}.json"))) else {
-        return Default::default();
-    };
-    serde_json::from_str(&json).unwrap_or_default()
-}
-
-struct Clone {
+struct PartialCache {
     dir: PathBuf,
+    missing: EnumSet<CacheKey>,
 }
 
-impl Clone {
-    fn new() -> anyhow::Result<Self> {
-        let repo = "https://github.com/NixOS/nixpkgs.git";
-        let dir = cache_dir()?.join("nixpkgs.git");
-        if fs::exists(&dir)? {
+struct Cache {
+    dir: PathBuf,
+    last_fetched: String,
+}
+
+impl Cache {
+    fn new() -> anyhow::Result<Result<Self, PartialCache>> {
+        let dir = dirs::cache_dir()
+            .ok_or_else(|| anyhow!("no cache directory"))?
+            .join(NAME);
+        let mut missing = EnumSet::empty();
+
+        let last_fetched = match fs::read_to_string(dir.join(CacheKey::LastFetched.name())) {
+            Ok(datetime) => Some(trim_newline(datetime)?),
+            Err(err) => match err.kind() {
+                io::ErrorKind::NotFound => None,
+                _ => bail!(err),
+            },
+        };
+        if last_fetched.is_none() {
+            missing.insert(CacheKey::LastFetched);
+        }
+
+        let git_dir = dir.join(CacheKey::Git.name());
+        if fs::exists(&git_dir)? {
             let output = Command::new(GIT)
                 .arg("-C")
-                .arg(&dir)
+                .arg(&git_dir)
                 .args(["remote", "--verbose"])
                 .stderr(Stdio::inherit())
                 .output()?;
             if !output.status.success() {
-                bail!("failed to list Git remotes in {}", dir.display());
+                bail!("failed to list Git remotes in {}", git_dir.display());
             }
             if str::from_utf8(&output.stdout)? != REMOTES {
-                bail!("unexpected Git remotes in {}", dir.display())
+                bail!("unexpected Git remotes in {}", git_dir.display())
             }
         } else {
-            eprintln!("Cloning {repo} which will use several gigabytes of disk space.");
-            let status = Command::new(GIT)
-                .args(["clone", "--mirror", repo])
-                .arg(&dir)
-                .status()?;
-            if !status.success() {
-                bail!("failed to clone {repo}");
+            missing.insert(CacheKey::Git);
+        }
+
+        for channel in Channel::iter() {
+            let key = channel.key();
+            if !fs::exists(dir.join(key.name()))? {
+                missing.insert(key);
             }
         }
-        Ok(Self { dir })
+
+        if missing.is_empty() {
+            Ok(Ok(Self {
+                dir,
+                last_fetched: last_fetched.unwrap(),
+            }))
+        } else {
+            Ok(Err(PartialCache { dir, missing }))
+        }
     }
 
     fn git(&self) -> Command {
         let mut cmd = Command::new(GIT);
-        cmd.arg("-C").arg(&self.dir);
+        cmd.arg("-C").arg(self.dir.join(CacheKey::Git.name()));
         cmd
     }
 }
 
 struct Remote {
-    clone: Clone,
+    cache: Cache,
     s3: s3::Client,
 }
 
 impl Remote {
-    async fn new(clone: Clone) -> Self {
+    async fn new(cache: Cache) -> Self {
         // We use `no_credentials` to avoid authenticating because it's a public bucket.
         let config = aws_config::defaults(BehaviorVersion::latest())
             .no_credentials()
@@ -130,30 +194,26 @@ impl Remote {
             .load()
             .await;
         let s3 = s3::Client::new(&config);
-        Self { clone, s3 }
+        Self { cache, s3 }
     }
 
     async fn git_revision(&self, prefix: &str) -> anyhow::Result<String> {
         let dot = prefix.rfind(".").ok_or_else(|| anyhow!("no dot"))?;
         let short = &prefix[dot + 1..prefix.len() - 1];
-        let output = self.clone.git().args(["rev-parse", short]).output()?;
-        if output.status.success() {
-            let mut sha = String::from_utf8(output.stdout)?;
-            if sha.pop() != Some('\n') {
-                bail!("expected trailing newline from `git rev-parse`");
-            }
-            Ok(sha)
+        let output = self.cache.git().args(["rev-parse", short]).output()?;
+        let sha = if output.status.success() {
+            trim_newline(String::from_utf8(output.stdout)?)?
         } else {
             let key = format!("{prefix}git-revision");
             let output = self.s3.get_object().bucket(BUCKET).key(key).send().await?;
-            let sha = String::from_utf8(output.body.collect().await?.to_vec())?;
-            Ok(sha)
-        }
+            String::from_utf8(output.body.collect().await?.to_vec())?
+        };
+        Ok(sha)
     }
 
     async fn list_revisions(
         &self,
-        channel: &str,
+        channel: Channel,
         releases: impl IntoIterator<Item = &str>,
         mut callback: impl FnMut(String, String),
     ) -> anyhow::Result<()> {
@@ -164,7 +224,7 @@ impl Remote {
                     .s3
                     .list_objects_v2()
                     .bucket(BUCKET)
-                    .prefix(unstable_channel_prefix(channel, release))
+                    .prefix(channel.prefix(release))
                     .delimiter("/")
                     .set_continuation_token(continuation_token)
                     .send()
@@ -185,16 +245,17 @@ impl Remote {
 
     async fn channel_json(
         &self,
-        channel: &'static str,
+        channel: Channel,
         releases: impl IntoIterator<Item = &str>,
     ) -> anyhow::Result<String> {
+        let channel_name: &str = channel.into();
         let spinner = ProgressBar::new_spinner();
-        spinner.set_message(channel);
+        spinner.set_message(channel_name);
         spinner.enable_steady_tick(Duration::from_millis(100));
         let mut pairs = IndexMap::new();
         self.list_revisions(channel, releases, |prefix, sha| {
             pairs.insert(prefix, sha);
-            spinner.set_message(format!("{channel}: {} commits", pairs.len()));
+            spinner.set_message(format!("{channel_name}: {} commits", pairs.len()));
         })
         .await?;
         let mut json = serde_json::to_string_pretty(&pairs)?;
@@ -215,6 +276,12 @@ enum Commands {
     /// Update local cache and Git clone of Nixpkgs
     Fetch,
 
+    /// Delete the cache
+    Clean,
+
+    /// Print the status of the cache
+    Status,
+
     /// List commits for an unstable channel in reverse chronological order
     List { channel: String },
 
@@ -225,29 +292,73 @@ enum Commands {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
-    // We parse CLI args before checking the Git clone to allow early exit for `--help`.
-    let clone = Clone::new()?;
-    match args.command {
-        Commands::Fetch => {
-            let remote = Remote::new(clone).await;
-            let dir = cache_dir()?;
-            for channel in UNSTABLE_CHANNELS {
+    // We parse CLI args before checking the cache, to allow early exit for `--help`.
+    match (Cache::new()?, args.command) {
+        (cache_result, Commands::Fetch) => {
+            // Same format as `--date=iso-local --format=%cd` for Git.
+            let last_fetched = now();
+            let cache = match cache_result {
+                Ok(mut cache) => {
+                    cache.last_fetched = last_fetched;
+                    cache
+                }
+                Err(PartialCache { dir, missing }) => {
+                    let cache = Cache { dir, last_fetched };
+                    if missing.contains(CacheKey::Git) {
+                        let repo = "https://github.com/NixOS/nixpkgs.git";
+                        let status = Command::new(GIT)
+                            .args(["clone", "--mirror", repo])
+                            .arg(cache.dir.join(CacheKey::Git.name()))
+                            .status()?;
+                        if !status.success() {
+                            bail!("failed to clone {repo}");
+                        }
+                    }
+                    cache
+                }
+            };
+            let remote = Remote::new(cache).await;
+            for channel in Channel::iter() {
                 let json = remote.channel_json(channel, [NEXT_RELEASE]).await?;
-                fs::write(dir.join(format!("{channel}.json")), json)?;
+                fs::write(remote.cache.dir.join(channel.key().name()), json)?;
             }
             // We fetch from Git after fetching from S3 so that, once we're done, all the commit
             // hashes we got from S3 should also be in our local Git clone.
-            let status = remote.clone.git().arg("fetch").status()?;
+            let status = remote.cache.git().arg("fetch").status()?;
             if !status.success() {
                 bail!("failed to fetch from Git");
             }
+            let mut last_fetched = remote.cache.last_fetched;
+            last_fetched.push('\n');
+            fs::write(
+                remote.cache.dir.join(CacheKey::LastFetched.name()),
+                last_fetched,
+            )?;
             Ok(())
         }
-        Commands::List { channel } => {
+        (cache_result, Commands::Clean) => {
+            let dir = match cache_result {
+                Ok(cache) => cache.dir,
+                Err(partial) => partial.dir,
+            };
+            fs::remove_dir_all(dir)?;
+            Ok(())
+        }
+        (Err(_), _) => {
+            bail!("cache missing; please run `{NAME} fetch`");
+        }
+        (Ok(cache), Commands::Status) => {
+            println!("current local time is {}", now());
+            println!("last fetched cache at {}", cache.last_fetched);
+            Ok(())
+        }
+        (Ok(cache), Commands::List { channel }) => {
+            let channel = Channel::from_str(&channel)?;
             let history: IndexMap<String, String> =
-                serde_json::from_str(unstable_channel_history(&channel).unwrap()).unwrap();
-            let current = cached(&channel);
-            let mut child = clone
+                serde_json::from_str(channel.history()).unwrap();
+            let current: IndexMap<String, String> =
+                serde_json::from_str(&fs::read_to_string(cache.dir.join(channel.key().name()))?)?;
+            let mut child = cache
                 .git()
                 .args([
                     "log",
@@ -267,13 +378,13 @@ async fn main() -> anyhow::Result<()> {
             child.wait()?;
             Ok(())
         }
-        Commands::History { dir } => {
-            let remote = Remote::new(clone).await;
-            for channel in UNSTABLE_CHANNELS {
+        (Ok(cache), Commands::History { dir }) => {
+            let remote = Remote::new(cache).await;
+            for channel in Channel::iter() {
                 let json = remote
                     .channel_json(channel, RELEASES.iter().copied())
                     .await?;
-                fs::write(dir.join(format!("{channel}.json")), json)?;
+                fs::write(dir.join(channel.key().name()), json)?;
             }
             Ok(())
         }

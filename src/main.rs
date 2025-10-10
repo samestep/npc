@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{anyhow, bail};
+use anyhow::{Context, anyhow, bail};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3 as s3;
 use clap::{Parser, Subcommand};
@@ -121,10 +121,7 @@ struct Cache {
 }
 
 impl Cache {
-    fn new() -> anyhow::Result<Result<Self, PartialCache>> {
-        let dir = dirs::cache_dir()
-            .ok_or_else(|| anyhow!("no cache directory"))?
-            .join(format!("nix-{NAME}"));
+    fn new(dir: PathBuf) -> anyhow::Result<Result<Self, PartialCache>> {
         let mut missing = EnumSet::empty();
 
         let last_fetched = match fs::read_to_string(dir.join(CacheKey::LastFetched.name())) {
@@ -299,7 +296,19 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
     // We parse CLI args before checking the cache, to allow early exit for `--help`.
-    match (Cache::new()?, args.command) {
+    let cache_dir = dirs::cache_dir()
+        .ok_or_else(|| anyhow!("no cache directory"))?
+        .join(format!("nix-{NAME}"));
+    if let Commands::Clean = args.command {
+        fs::remove_file(cache_dir.join(CacheKey::LastFetched.name()))?;
+        return Ok(());
+    }
+    // We checked for the `clean` subcommand first since it must still work if the cache is broken.
+    match (
+        Cache::new(cache_dir)
+            .with_context(|| format!("cache broken; please run `{NAME} clean`"))?,
+        args.command,
+    ) {
         (cache_result, Commands::Fetch) => {
             // Same format as `--date=iso-local --format=%cd` for Git.
             let last_fetched = now();
@@ -342,14 +351,7 @@ async fn main() -> anyhow::Result<()> {
             )?;
             Ok(())
         }
-        (cache_result, Commands::Clean) => {
-            let dir = match cache_result {
-                Ok(cache) => cache.dir,
-                Err(partial) => partial.dir,
-            };
-            fs::remove_dir_all(dir)?;
-            Ok(())
-        }
+        (_, Commands::Clean) => unreachable!(),
         (Err(_), _) => {
             bail!("cache missing; please run `{NAME} fetch`");
         }

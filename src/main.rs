@@ -1,8 +1,29 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::Duration,
+};
 
+use anyhow::{anyhow, bail};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3 as s3;
 use clap::{Parser, Subcommand};
+use indexmap::IndexMap;
+use indicatif::ProgressBar;
+
+/// The name of this program.
+const NAME: &str = "nixpkgs";
+
+const GIT: &str = "git";
+
+const REMOTES: &str = "
+origin\thttps://github.com/NixOS/nixpkgs.git (fetch)
+origin\thttps://github.com/NixOS/nixpkgs.git (push)
+"
+.trim_ascii_start();
+
+const BUCKET: &str = "nix-releases";
 
 // We must specify the same region as the bucket or it responds with a `PermanentRedirect` error.
 // This command can be used to check: `curl --head https://nix-releases.s3.amazonaws.com/`
@@ -26,7 +47,43 @@ fn unstable_channel_prefix(channel: &str, release: &str) -> String {
     format!("{prefix}-{release}pre")
 }
 
-async fn get_client() -> s3::Client {
+fn cache_dir() -> anyhow::Result<PathBuf> {
+    Ok(dirs::cache_dir()
+        .ok_or_else(|| anyhow!("no cache directory"))?
+        .join(NAME))
+}
+
+fn git_clone() -> anyhow::Result<PathBuf> {
+    let repo = "https://github.com/NixOS/nixpkgs.git";
+    let dir = cache_dir()?.join("nixpkgs.git");
+    if fs::exists(&dir)? {
+        let output = Command::new(GIT)
+            .arg("-C")
+            .arg(&dir)
+            .args(["remote", "--verbose"])
+            .stderr(Stdio::inherit())
+            .output()?;
+        if !output.status.success() {
+            bail!("failed to list Git remotes in {}", dir.display());
+        }
+        if str::from_utf8(&output.stdout)? != REMOTES {
+            bail!("unexpected Git remotes in {}", dir.display())
+        }
+        Ok(dir)
+    } else {
+        eprintln!("Cloning {repo} which will use several gigabytes of disk space.");
+        let status = Command::new(GIT)
+            .args(["clone", "--mirror", repo])
+            .arg(&dir)
+            .status()?;
+        if !status.success() {
+            bail!("failed to clone {repo}");
+        }
+        Ok(dir)
+    }
+}
+
+async fn s3_client() -> s3::Client {
     // We use `no_credentials` to avoid authenticating because it's a public bucket.
     let config = aws_config::defaults(BehaviorVersion::latest())
         .no_credentials()
@@ -34,6 +91,67 @@ async fn get_client() -> s3::Client {
         .load()
         .await;
     s3::Client::new(&config)
+}
+
+struct Remote {
+    clone: PathBuf,
+    s3: s3::Client,
+}
+
+impl Remote {
+    async fn git_revision(&self, prefix: &str) -> anyhow::Result<String> {
+        let dot = prefix.rfind(".").ok_or_else(|| anyhow!("no dot"))?;
+        let short = &prefix[dot + 1..prefix.len() - 1];
+        let output = Command::new(GIT)
+            .arg("-C")
+            .arg(&self.clone)
+            .args(["rev-parse", short])
+            .output()?;
+        if output.status.success() {
+            let mut sha = String::from_utf8(output.stdout)?;
+            if sha.pop() != Some('\n') {
+                bail!("expected trailing newline from `git rev-parse`");
+            }
+            Ok(sha)
+        } else {
+            let key = format!("{prefix}git-revision");
+            let output = self.s3.get_object().bucket(BUCKET).key(key).send().await?;
+            let sha = String::from_utf8(output.body.collect().await?.to_vec())?;
+            Ok(sha)
+        }
+    }
+
+    async fn list_revisions(
+        &self,
+        channel: &str,
+        releases: impl IntoIterator<Item = &str>,
+        mut callback: impl FnMut(String, String),
+    ) -> anyhow::Result<()> {
+        for release in releases {
+            let mut continuation_token = None;
+            loop {
+                let output = self
+                    .s3
+                    .list_objects_v2()
+                    .bucket(BUCKET)
+                    .prefix(unstable_channel_prefix(channel, release))
+                    .delimiter("/")
+                    .set_continuation_token(continuation_token)
+                    .send()
+                    .await?;
+                for item in output.common_prefixes.unwrap_or_default() {
+                    let prefix = item.prefix.ok_or_else(|| anyhow!("missing prefix"))?;
+                    let sha = self.git_revision(&prefix).await?;
+                    callback(prefix, sha);
+                }
+                match output.next_continuation_token {
+                    Some(token) => continuation_token = Some(token),
+                    None => break,
+                };
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Parser)]
@@ -44,40 +162,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Generate JSON files for unstable channel commits before the most recent release
     History { dir: PathBuf },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+    let args = Cli::parse();
+    let clone = git_clone()?;
+    match args.command {
         Commands::History { dir } => {
-            let client = get_client().await;
+            let s3 = s3_client().await;
+            let remote = Remote { clone, s3 };
             for channel in UNSTABLE_CHANNELS {
-                let filename = dir.join(format!("{channel}.txt"));
-                let mut lines = String::new();
-                for release in RELEASES {
-                    let mut continuation_token = None;
-                    loop {
-                        let output = client
-                            .list_objects_v2()
-                            .bucket("nix-releases")
-                            .prefix(unstable_channel_prefix(channel, release))
-                            .delimiter("/")
-                            .set_continuation_token(continuation_token)
-                            .send()
-                            .await?;
-                        for prefix in output.common_prefixes() {
-                            lines.push_str(prefix.prefix().unwrap());
-                            lines.push('\n');
-                        }
-                        let token = output.next_continuation_token;
-                        if token.is_none() {
-                            break;
-                        }
-                        continuation_token = token;
-                    }
-                }
-                fs::write(filename, lines)?;
+                let spinner = ProgressBar::new_spinner();
+                spinner.set_message(*channel);
+                spinner.enable_steady_tick(Duration::from_millis(100));
+                let mut pairs = IndexMap::new();
+                remote
+                    .list_revisions(channel, RELEASES.iter().copied(), |prefix, sha| {
+                        pairs.insert(prefix, sha);
+                        spinner.set_message(format!("{channel}: {} commits", pairs.len()));
+                    })
+                    .await?;
+                let mut json = serde_json::to_string_pretty(&pairs)?;
+                json.push('\n');
+                fs::write(dir.join(format!("{channel}.json")), json)?;
+                spinner.finish();
             }
             Ok(())
         }

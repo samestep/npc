@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     path::PathBuf,
     process::{Command, Stdio},
     time::Duration,
@@ -112,27 +113,6 @@ impl Clone {
         let mut cmd = Command::new(GIT);
         cmd.arg("-C").arg(&self.dir);
         cmd
-    }
-
-    fn commit_date(&self, sha: &str) -> anyhow::Result<String> {
-        let output = self
-            .git()
-            .args([
-                "show",
-                "--no-patch",
-                "--date=iso-local",
-                "--format=%cd",
-                sha,
-            ])
-            .output()?;
-        if !output.status.success() {
-            bail!("failed to show Git commit date");
-        }
-        let mut date = String::from_utf8(output.stdout)?;
-        if date.pop() != Some('\n') {
-            bail!("expected trailing newline from `git show`");
-        }
-        Ok(date)
     }
 }
 
@@ -267,10 +247,24 @@ async fn main() -> anyhow::Result<()> {
             let history: IndexMap<String, String> =
                 serde_json::from_str(unstable_channel_history(&channel).unwrap()).unwrap();
             let current = cached(&channel);
+            let mut child = clone
+                .git()
+                .args([
+                    "log",
+                    "--no-walk=unsorted",
+                    "--date=iso-local",
+                    "--format=%H %cd",
+                    "--stdin",
+                ])
+                .stdin(Stdio::piped())
+                .spawn()?;
+            // We use `--stdin` to avoid possible issues from passing too many arguments.
             for sha in history.values().chain(current.values()).rev() {
-                let date = clone.commit_date(sha)?;
-                println!("{sha} {date}");
+                let stdin = child.stdin.as_mut().unwrap();
+                stdin.write_all(sha.as_bytes())?;
+                stdin.write_all("\n".as_bytes())?;
             }
+            child.wait()?;
             Ok(())
         }
         Commands::History { dir } => {

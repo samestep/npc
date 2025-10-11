@@ -13,12 +13,14 @@ use aws_sdk_s3 as s3;
 use clap::{Parser, Subcommand};
 use indexmap::IndexMap;
 use indicatif::ProgressBar;
+use serde::Deserialize;
 use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
 /// The name of this program.
 const NAME: &str = env!("CARGO_PKG_NAME");
 
 const GIT: &str = "git";
+const NIX: &str = "nix";
 
 const REMOTES: &str = "
 origin\thttps://github.com/NixOS/nixpkgs.git (fetch)
@@ -259,6 +261,44 @@ impl Remote {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum FlakeOriginal {
+    #[serde(rename = "github")]
+    GitHub {
+        owner: String,
+
+        repo: String,
+
+        #[serde(rename = "ref")]
+        branch: Option<String>,
+    },
+
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum FlakeLocked {
+    #[serde(rename = "github")]
+    GitHub { owner: String, repo: String },
+
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+struct FlakeNode {
+    original: Option<FlakeOriginal>,
+    locked: Option<FlakeLocked>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FlakeLock {
+    nodes: IndexMap<String, FlakeNode>,
+}
+
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]
@@ -278,6 +318,9 @@ enum Commands {
 
     /// List commits for an unstable channel in reverse chronological order
     List { channel: String },
+
+    /// Set a different Nixpkgs commit in `flake.lock`
+    Checkout { rev: String },
 
     /// Use binary search to find the newest historical commit of a channel before a bug
     Bisect {
@@ -430,6 +473,74 @@ async fn main() -> anyhow::Result<()> {
                 stdin.write_all("\n".as_bytes())?;
             }
             child.wait()?;
+            Ok(())
+        }
+        (Ok(cache), Commands::Checkout { rev }) => {
+            let sha = {
+                let output = cache
+                    .git()
+                    .args(["rev-parse", &rev])
+                    .stderr(Stdio::inherit())
+                    .output()?;
+                if !output.status.success() {
+                    bail!("failed to disambiguate Nixpkgs commit {rev}");
+                }
+                trim_newline(String::from_utf8(output.stdout)?)?
+            };
+            let flake_lock: FlakeLock = serde_json::from_str(&fs::read_to_string("flake.lock")?)?;
+            let mut options: Vec<(String, Option<String>)> = flake_lock
+                .nodes
+                .into_iter()
+                .filter_map(|(name, node)| {
+                    if let (
+                        Some(FlakeOriginal::GitHub {
+                            owner: owner_original,
+                            repo: repo_original,
+                            branch,
+                        }),
+                        Some(FlakeLocked::GitHub {
+                            owner: owner_locked,
+                            repo: repo_locked,
+                        }),
+                    ) = (node.original, node.locked)
+                        && owner_original == "NixOS"
+                        && repo_original == "nixpkgs"
+                        && owner_locked == "NixOS"
+                        && repo_locked == "nixpkgs"
+                    {
+                        Some((name, branch))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let (name, branch) = options
+                .pop()
+                .ok_or_else(|| anyhow!("no Nixpkgs input found in `flake.lock`"))?;
+            if !options.is_empty() {
+                bail!("ambiguous due to multiple Nixpkgs inputs in `flake.lock`");
+            }
+            if let Some(branch) = branch
+                && !cache
+                    .channel(Channel::from_str(&branch)?)?
+                    .into_values()
+                    .any(|commit| sha == commit)
+            {
+                bail!("the history of {branch} does not contain commit {sha}");
+            };
+            let status = Command::new(NIX)
+                .args([
+                    "flake",
+                    "update",
+                    &name,
+                    "--override-input",
+                    &name,
+                    &format!("github:NixOS/nixpkgs/{sha}"),
+                ])
+                .status()?;
+            if !status.success() {
+                bail!("failed to update `flake.lock`");
+            }
             Ok(())
         }
         (Ok(_), Commands::Bisect { bisect }) => match bisect {

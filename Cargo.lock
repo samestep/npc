@@ -1718,6 +1718,7 @@ dependencies = [
  "dirs",
  "indexmap",
  "indicatif",
+ "serde",
  "serde_json",
  "strum",
  "tokio",

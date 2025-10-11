@@ -1,7 +1,8 @@
 use std::{
-    fs,
+    env, fmt, fs,
     io::{self, Write},
-    path::PathBuf,
+    os::unix::ffi::OsStrExt,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     str::FromStr,
     time::Duration,
@@ -11,10 +12,12 @@ use anyhow::{Context, anyhow, bail};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3 as s3;
 use clap::{Parser, Subcommand};
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use indicatif::ProgressBar;
-use serde::Deserialize;
+use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Visitor};
 use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
+use thiserror::Error;
 
 /// The name of this program.
 const NAME: &str = env!("CARGO_PKG_NAME");
@@ -56,12 +59,79 @@ fn now() -> String {
         .to_string()
 }
 
-#[derive(Clone, Copy, EnumIter, EnumString, IntoStaticStr)]
+#[derive(Error, Debug)]
+#[error("invalid Git SHA")]
+struct ParseShaError;
+
+#[derive(Debug, Eq, Hash, PartialEq)]
+struct Sha([u8; 20]);
+
+impl fmt::Display for Sha {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for byte in self.0 {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for Sha {
+    type Err = ParseShaError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() != 40 {
+            return Err(ParseShaError);
+        }
+        let mut array = [0u8; 20];
+        for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+            let substr = str::from_utf8(chunk).map_err(|_| ParseShaError)?;
+            array[i] = u8::from_str_radix(substr, 16).map_err(|_| ParseShaError)?;
+        }
+        Ok(Sha(array))
+    }
+}
+
+impl Serialize for Sha {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Sha {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_str(ShaVisitor)
+    }
+}
+
+struct ShaVisitor;
+
+impl<'de> Visitor<'de> for ShaVisitor {
+    type Value = Sha;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a Git SHA")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        v.parse().map_err(E::custom)
+    }
+}
+
+#[derive(
+    Clone, Copy, Deserialize, EnumIter, EnumString, Eq, IntoStaticStr, PartialEq, Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 enum Channel {
     NixosUnstable,
     NixosUnstableSmall,
     NixpkgsUnstable,
+}
+
+impl fmt::Display for Channel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.into())
+    }
 }
 
 impl Channel {
@@ -82,23 +152,30 @@ impl Channel {
         format!("{prefix}-{release}pre")
     }
 
-    fn key(self) -> CacheKey {
+    fn key(self) -> CacheKey<'static> {
         CacheKey::Channel(self)
     }
 }
 
-enum CacheKey {
+enum CacheKey<'a> {
     LastFetched,
     Git,
     Channel(Channel),
+    Bisect(&'a Path),
 }
 
-impl CacheKey {
+impl CacheKey<'_> {
     fn name(self) -> String {
         match self {
             Self::LastFetched => "last-fetched.txt".to_owned(),
             Self::Git => "nixpkgs.git".to_owned(),
             Self::Channel(channel) => format!("{}.json", <&str>::from(channel)),
+            Self::Bisect(path) => {
+                assert!(path.is_absolute());
+                // We use percent encoding to turn an entire path into a single pathname component.
+                let encoded = percent_encode(path.as_os_str().as_bytes(), NON_ALPHANUMERIC);
+                format!("bisect/{encoded}.json")
+            }
         }
     }
 }
@@ -154,6 +231,8 @@ impl Cache {
             }
         }
 
+        fs::create_dir_all(dir.join("bisect"))?;
+
         if missing_git || missing_other {
             Ok(Err(PartialCache { dir, missing_git }))
         } else {
@@ -164,16 +243,36 @@ impl Cache {
         }
     }
 
+    fn path(&self, key: CacheKey) -> PathBuf {
+        self.dir.join(key.name())
+    }
+
     fn git(&self) -> Command {
         let mut cmd = Command::new(GIT);
-        cmd.arg("-C").arg(self.dir.join(CacheKey::Git.name()));
+        cmd.arg("-C").arg(self.path(CacheKey::Git));
         cmd
     }
 
-    fn channel(&self, channel: Channel) -> anyhow::Result<IndexMap<String, String>> {
-        Ok(serde_json::from_str(&fs::read_to_string(
-            self.dir.join(channel.key().name()),
-        )?)?)
+    fn sha(&self, rev: &str) -> anyhow::Result<Sha> {
+        let output = self
+            .git()
+            .args(["rev-parse", rev])
+            .stderr(Stdio::inherit())
+            .output()?;
+        if !output.status.success() {
+            bail!("failed to disambiguate Nixpkgs commit {rev}");
+        }
+        Ok(trim_newline(String::from_utf8(output.stdout)?)?.parse()?)
+    }
+
+    fn channel(&self, channel: Channel) -> anyhow::Result<IndexMap<String, Sha>> {
+        let mut commits: IndexMap<String, Sha> = serde_json::from_str(channel.history()).unwrap();
+        let current: IndexMap<String, Sha> =
+            serde_json::from_str(&fs::read_to_string(self.path(channel.key()))?)?;
+        for (prefix, sha) in current {
+            commits.insert(prefix, sha);
+        }
+        Ok(commits)
     }
 }
 
@@ -194,25 +293,25 @@ impl Remote {
         Self { cache, s3 }
     }
 
-    async fn git_revision(&self, prefix: &str) -> anyhow::Result<String> {
+    async fn git_revision(&self, prefix: &str) -> anyhow::Result<Sha> {
         let dot = prefix.rfind(".").ok_or_else(|| anyhow!("no dot"))?;
         let short = &prefix[dot + 1..prefix.len() - 1];
         let output = self.cache.git().args(["rev-parse", short]).output()?;
-        let sha = if output.status.success() {
+        let string = if output.status.success() {
             trim_newline(String::from_utf8(output.stdout)?)?
         } else {
             let key = format!("{prefix}git-revision");
             let output = self.s3.get_object().bucket(BUCKET).key(key).send().await?;
             String::from_utf8(output.body.collect().await?.to_vec())?
         };
-        Ok(sha)
+        Ok(string.parse()?)
     }
 
     async fn list_revisions(
         &self,
         channel: Channel,
         releases: impl IntoIterator<Item = &str>,
-        mut callback: impl FnMut(String, String),
+        mut callback: impl FnMut(String, Sha),
     ) -> anyhow::Result<()> {
         for release in releases {
             let mut continuation_token = None;
@@ -283,7 +382,11 @@ enum FlakeOriginal {
 #[serde(tag = "type")]
 enum FlakeLocked {
     #[serde(rename = "github")]
-    GitHub { owner: String, repo: String },
+    GitHub {
+        owner: String,
+        repo: String,
+        rev: Sha,
+    },
 
     #[serde(other)]
     Other,
@@ -298,6 +401,132 @@ struct FlakeNode {
 #[derive(Debug, Deserialize)]
 struct FlakeLock {
     nodes: IndexMap<String, FlakeNode>,
+}
+
+impl FlakeLock {
+    fn new() -> anyhow::Result<Option<Self>> {
+        let err = match fs::read_to_string("flake.lock") {
+            Ok(json) => match serde_json::from_str(&json) {
+                Ok(flake_lock) => return Ok(Some(flake_lock)),
+                Err(err) => anyhow!(err),
+            },
+            Err(err) => match err.kind() {
+                io::ErrorKind::NotFound => return Ok(None),
+                _ => anyhow!(err),
+            },
+        };
+        Err(err.context("`flake.lock` broken"))
+    }
+}
+
+struct FlakeInput {
+    name: String,
+    rev: Sha,
+}
+
+fn filter_node(node: FlakeNode) -> Option<(Channel, Sha)> {
+    if let (
+        Some(FlakeOriginal::GitHub {
+            owner: owner_original,
+            repo: repo_original,
+            branch: Some(branch),
+        }),
+        Some(FlakeLocked::GitHub {
+            owner: owner_locked,
+            repo: repo_locked,
+            rev,
+        }),
+    ) = (node.original, node.locked)
+        && let Ok(channel) = Channel::from_str(&branch)
+        && owner_original == "NixOS"
+        && repo_original == "nixpkgs"
+        && owner_locked == "NixOS"
+        && repo_locked == "nixpkgs"
+    {
+        Some((channel, rev))
+    } else {
+        None
+    }
+}
+
+fn resolve(
+    channel: Option<Channel>,
+    flake_input: Option<String>,
+) -> anyhow::Result<(Channel, Option<FlakeInput>)> {
+    match (channel, flake_input, FlakeLock::new()?) {
+        (Some(_), Some(_), _) => bail!("cannot specify both channel and `--input`"),
+        (_, Some(_), None) => bail!("specified `--input` but no `flake.lock`"),
+        (None, None, None) => bail!("no `flake.lock` found; please specify a channel"),
+        (Some(channel), None, _) => Ok((channel, None)),
+        (None, Some(name), Some(mut flake_lock)) => {
+            let Some(node) = flake_lock.nodes.swap_remove(&name) else {
+                bail!("no flake input found named {name}");
+            };
+            let Some((chan, rev)) = filter_node(node) else {
+                bail!("expected Nixpkgs in flake input named {name}");
+            };
+            Ok((chan, Some(FlakeInput { name, rev })))
+        }
+        (None, None, Some(flake_lock)) => {
+            let mut choices: Vec<_> = flake_lock
+                .nodes
+                .into_iter()
+                .filter_map(|(name, node)| Some((name, filter_node(node)?)))
+                .collect();
+            let (name, (channel, rev)) = choices
+                .pop()
+                .ok_or_else(|| anyhow!("no Nixpkgs input found in `flake.lock`"))?;
+            if !choices.is_empty() {
+                bail!("multiple Nixpkgs inputs in `flake.lock`; please specify `--input`");
+            }
+            Ok((channel, Some(FlakeInput { name, rev })))
+        }
+    }
+}
+
+fn flake_update(name: &str, sha: Sha) -> anyhow::Result<()> {
+    let status = Command::new(NIX)
+        .args([
+            "flake",
+            "update",
+            name,
+            "--override-input",
+            name,
+            &format!("github:NixOS/nixpkgs/{sha}"),
+        ])
+        .status()?;
+    if !status.success() {
+        bail!("failed to update `flake.lock`");
+    }
+    Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+struct Bisection {
+    channel: Channel,
+    input: Option<String>,
+    bad: IndexSet<Sha>,
+    good: IndexSet<Sha>,
+}
+
+impl Bisection {
+    fn new(path: &Path) -> anyhow::Result<Self> {
+        let err = match fs::read_to_string(path) {
+            Ok(json) => match serde_json::from_str(&json) {
+                Ok(info) => return Ok(info),
+                Err(err) => anyhow!(err),
+            },
+            Err(err) => match err.kind() {
+                io::ErrorKind::NotFound => {
+                    bail!("not currently bisecting here; please run `{NAME} bisect start`");
+                }
+                _ => anyhow!(err),
+            },
+        };
+        Err(err.context(format!(
+            "bisection state broken; please run `{NAME} bisect reset`"
+        )))
+    }
 }
 
 #[derive(Parser)]
@@ -319,14 +548,24 @@ enum Commands {
 
     /// List commits for an unstable channel in reverse chronological order
     List {
-        channel: String,
+        channel: Option<String>,
+
+        #[clap(long)]
+        input: Option<String>,
 
         #[clap(short = 'n', long)]
         max_count: Option<usize>,
     },
 
     /// Set a different Nixpkgs commit in `flake.lock`
-    Checkout { rev: String },
+    Checkout {
+        rev: String,
+
+        channel: Option<String>,
+
+        #[clap(long)]
+        input: Option<String>,
+    },
 
     /// Use binary search to find the newest historical commit of a channel before a bug
     Bisect {
@@ -341,21 +580,23 @@ enum Commands {
 #[derive(Subcommand)]
 enum Bisect {
     /// Start bisecting in this directory
-    Start,
+    Start {
+        channel: Option<String>,
+
+        #[clap(long)]
+        input: Option<String>,
+    },
 
     /// Mark this commit as "bad"
     #[command(visible_alias = "new")]
-    Bad,
+    Bad { rev: Option<String> },
 
     /// Mark this commit as "good"
     #[command(visible_alias = "old")]
-    Good,
+    Good { rev: Option<String> },
 
     /// Delete bisection state for this directory
     Reset,
-
-    /// Mark commits as "good" iff a command exits with code 0
-    Run { cmd: String, args: Vec<String> },
 }
 
 #[tokio::main]
@@ -388,7 +629,7 @@ async fn main() -> anyhow::Result<()> {
                         let repo = "https://github.com/NixOS/nixpkgs.git";
                         let status = Command::new(GIT)
                             .args(["clone", "--mirror", repo])
-                            .arg(cache.dir.join(CacheKey::Git.name()))
+                            .arg(cache.path(CacheKey::Git))
                             .status()?;
                         if !status.success() {
                             bail!("failed to clone {repo}");
@@ -400,7 +641,7 @@ async fn main() -> anyhow::Result<()> {
             let remote = Remote::new(cache).await;
             for channel in Channel::iter() {
                 let json = remote.channel_json(channel, [NEXT_RELEASE]).await?;
-                fs::write(remote.cache.dir.join(channel.key().name()), json)?;
+                fs::write(remote.cache.path(channel.key()), json)?;
             }
             // We fetch from Git after fetching from S3 so that, once we're done, all the commit
             // hashes we got from S3 should also be in our local Git clone.
@@ -414,12 +655,10 @@ async fn main() -> anyhow::Result<()> {
             if !status.success() {
                 bail!("failed to fetch from Git");
             }
+            let path = remote.cache.path(CacheKey::LastFetched);
             let mut last_fetched = remote.cache.last_fetched;
             last_fetched.push('\n');
-            fs::write(
-                remote.cache.dir.join(CacheKey::LastFetched.name()),
-                last_fetched,
-            )?;
+            fs::write(path, last_fetched)?;
             Ok(())
         }
         (_, Commands::Clean) => unreachable!(),
@@ -443,13 +682,8 @@ async fn main() -> anyhow::Result<()> {
                     Some((_, sha)) => {
                         let output = cache
                             .git()
-                            .args([
-                                "show",
-                                "--no-patch",
-                                "--date=iso-local",
-                                "--format=%cd",
-                                sha,
-                            ])
+                            .args(["show", "--no-patch", "--date=iso-local", "--format=%cd"])
+                            .arg(sha.to_string())
                             .output()?;
                         if !output.status.success() {
                             bail!("failed to show Git commit date");
@@ -461,11 +695,17 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        (Ok(cache), Commands::List { channel, max_count }) => {
-            let channel = Channel::from_str(&channel)?;
-            let history: IndexMap<String, String> =
-                serde_json::from_str(channel.history()).unwrap();
-            let current = cache.channel(channel)?;
+        (
+            Ok(cache),
+            Commands::List {
+                channel,
+                input,
+                max_count,
+            },
+        ) => {
+            let channel = channel.map(|name| Channel::from_str(&name)).transpose()?;
+            let (channel, _) = resolve(channel, input)?;
+            let commits = cache.channel(channel)?;
             let mut cmd = cache.git();
             cmd.args([
                 "log",
@@ -479,89 +719,97 @@ async fn main() -> anyhow::Result<()> {
             }
             let mut child = cmd.stdin(Stdio::piped()).spawn()?;
             // We use `--stdin` to avoid possible issues from passing too many arguments.
-            for sha in history.values().chain(current.values()).rev() {
+            for sha in commits.values().rev() {
                 let stdin = child.stdin.as_mut().unwrap();
-                stdin.write_all(sha.as_bytes())?;
+                stdin.write_all(sha.to_string().as_bytes())?;
                 stdin.write_all("\n".as_bytes())?;
             }
             child.wait()?;
             Ok(())
         }
-        (Ok(cache), Commands::Checkout { rev }) => {
-            let sha = {
-                let output = cache
-                    .git()
-                    .args(["rev-parse", &rev])
-                    .stderr(Stdio::inherit())
-                    .output()?;
-                if !output.status.success() {
-                    bail!("failed to disambiguate Nixpkgs commit {rev}");
-                }
-                trim_newline(String::from_utf8(output.stdout)?)?
+        (
+            Ok(cache),
+            Commands::Checkout {
+                rev,
+                channel,
+                input,
+            },
+        ) => {
+            let sha = cache.sha(&rev)?;
+            let channel = channel.map(|name| Channel::from_str(&name)).transpose()?;
+            let (channel, Some(input)) = resolve(channel, input)? else {
+                bail!("could not determine flake input to update");
             };
-            let flake_lock: FlakeLock = serde_json::from_str(&fs::read_to_string("flake.lock")?)?;
-            let mut options: Vec<(String, Option<String>)> = flake_lock
-                .nodes
-                .into_iter()
-                .filter_map(|(name, node)| {
-                    if let (
-                        Some(FlakeOriginal::GitHub {
-                            owner: owner_original,
-                            repo: repo_original,
-                            branch,
-                        }),
-                        Some(FlakeLocked::GitHub {
-                            owner: owner_locked,
-                            repo: repo_locked,
-                        }),
-                    ) = (node.original, node.locked)
-                        && owner_original == "NixOS"
-                        && repo_original == "nixpkgs"
-                        && owner_locked == "NixOS"
-                        && repo_locked == "nixpkgs"
-                    {
-                        Some((name, branch))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            let (name, branch) = options
-                .pop()
-                .ok_or_else(|| anyhow!("no Nixpkgs input found in `flake.lock`"))?;
-            if !options.is_empty() {
-                bail!("ambiguous due to multiple Nixpkgs inputs in `flake.lock`");
-            }
-            if let Some(branch) = branch
-                && !cache
-                    .channel(Channel::from_str(&branch)?)?
-                    .into_values()
-                    .any(|commit| sha == commit)
+            if !cache
+                .channel(channel)?
+                .into_values()
+                .any(|commit| sha == commit)
             {
-                bail!("the history of {branch} does not contain commit {sha}");
+                bail!("the history of {channel} does not contain commit {sha}");
             };
-            let status = Command::new(NIX)
-                .args([
-                    "flake",
-                    "update",
-                    &name,
-                    "--override-input",
-                    &name,
-                    &format!("github:NixOS/nixpkgs/{sha}"),
-                ])
-                .status()?;
-            if !status.success() {
-                bail!("failed to update `flake.lock`");
-            }
+            flake_update(&input.name, sha)?;
             Ok(())
         }
-        (Ok(_), Commands::Bisect { bisect }) => match bisect {
-            Bisect::Start => todo!(),
-            Bisect::Good => todo!(),
-            Bisect::Bad => todo!(),
-            Bisect::Reset => todo!(),
-            Bisect::Run { cmd: _, args: _ } => todo!(),
-        },
+        (Ok(cache), Commands::Bisect { bisect }) => {
+            let path = cache.path(CacheKey::Bisect(&env::current_dir()?));
+            match bisect {
+                Bisect::Start { channel, input } => {
+                    if fs::exists(&path)? {
+                        bail!("already bisecting here; to start anew, run `{NAME} bisect reset`");
+                    }
+                    let channel = channel.map(|name| Channel::from_str(&name)).transpose()?;
+                    let (channel, input) = resolve(channel, input)?;
+                    let bisection = Bisection {
+                        channel,
+                        input: input.map(|input| input.name),
+                        bad: IndexSet::new(),
+                        good: IndexSet::new(),
+                    };
+                    let mut json = serde_json::to_string_pretty(&bisection)?;
+                    json.push('\n');
+                    fs::write(path, json)?;
+                    Ok(())
+                }
+                Bisect::Bad { rev } => {
+                    let rev = rev.map(|rev| cache.sha(&rev)).transpose()?;
+                    let mut bisection = Bisection::new(&path)?;
+                    let (_, input) = resolve(Some(bisection.channel), bisection.input.clone())?;
+                    let rev = match (rev, input) {
+                        (Some(rev), _) => rev,
+                        // Explicit commit from the CLI takes precedence over current flake input.
+                        (None, Some(input)) => input.rev,
+                        (None, None) => bail!("please specify a commit"),
+                    };
+                    bisection.bad.insert(rev);
+                    let mut json = serde_json::to_string_pretty(&bisection)?;
+                    json.push('\n');
+                    fs::write(path, json)?;
+                    // TODO: Update `flake.lock` with a different Nixpkgs commit.
+                    Ok(())
+                }
+                Bisect::Good { rev } => {
+                    let rev = rev.map(|rev| cache.sha(&rev)).transpose()?;
+                    let mut bisection = Bisection::new(&path)?;
+                    let (_, input) = resolve(Some(bisection.channel), bisection.input.clone())?;
+                    let rev = match (rev, input) {
+                        (Some(rev), _) => rev,
+                        // Explicit commit from the CLI takes precedence over current flake input.
+                        (None, Some(input)) => input.rev,
+                        (None, None) => bail!("please specify a commit"),
+                    };
+                    bisection.good.insert(rev);
+                    let mut json = serde_json::to_string_pretty(&bisection)?;
+                    json.push('\n');
+                    fs::write(path, json)?;
+                    // TODO: Update `flake.lock` with a different Nixpkgs commit.
+                    Ok(())
+                }
+                Bisect::Reset => fs::remove_file(path).or_else(|err| match err.kind() {
+                    io::ErrorKind::NotFound => Ok(()),
+                    _ => Err(anyhow!(err)),
+                }),
+            }
+        }
         (Ok(cache), Commands::History { dir }) => {
             let remote = Remote::new(cache).await;
             for channel in Channel::iter() {

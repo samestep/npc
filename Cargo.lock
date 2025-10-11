@@ -1718,9 +1718,11 @@ dependencies = [
  "dirs",
  "indexmap",
  "indicatif",
+ "percent-encoding",
  "serde",
  "serde_json",
  "strum",
+ "thiserror",
  "tokio",
 ]
 

@@ -404,7 +404,13 @@ async fn main() -> anyhow::Result<()> {
             }
             // We fetch from Git after fetching from S3 so that, once we're done, all the commit
             // hashes we got from S3 should also be in our local Git clone.
-            let status = remote.cache.git().arg("fetch").status()?;
+            let status = remote
+                .cache
+                .git()
+                .args(["fetch", "--no-show-forced-updates"])
+                .status()?;
+            // Without the `--no-show-forced-updates` flag, Git prints spends a lot of time figuring
+            // out that all the updates to refs/pull/*/head and refs/pull/*/merge were forced.
             if !status.success() {
                 bail!("failed to fetch from Git");
             }

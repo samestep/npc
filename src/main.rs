@@ -50,6 +50,7 @@ fn trim_newline(mut string: String) -> anyhow::Result<String> {
 }
 
 fn now() -> String {
+    // Same format as `--date=iso-local --format=%cd` for Git.
     chrono::Local::now()
         .format("%Y-%m-%d %H:%M:%S %z")
         .to_string()
@@ -375,7 +376,6 @@ async fn main() -> anyhow::Result<()> {
         args.command,
     ) {
         (cache_result, Commands::Fetch) => {
-            // Same format as `--date=iso-local --format=%cd` for Git.
             let last_fetched = now();
             let cache = match cache_result {
                 Ok(mut cache) => {

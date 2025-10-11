@@ -317,7 +317,12 @@ enum Commands {
     Status,
 
     /// List commits for an unstable channel in reverse chronological order
-    List { channel: String },
+    List {
+        channel: String,
+
+        #[clap(short = 'n', long)]
+        max_count: Option<usize>,
+    },
 
     /// Set a different Nixpkgs commit in `flake.lock`
     Checkout { rev: String },
@@ -450,22 +455,23 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        (Ok(cache), Commands::List { channel }) => {
+        (Ok(cache), Commands::List { channel, max_count }) => {
             let channel = Channel::from_str(&channel)?;
             let history: IndexMap<String, String> =
                 serde_json::from_str(channel.history()).unwrap();
             let current = cache.channel(channel)?;
-            let mut child = cache
-                .git()
-                .args([
-                    "log",
-                    "--no-walk=unsorted",
-                    "--date=iso-local",
-                    "--format=%H %cd",
-                    "--stdin",
-                ])
-                .stdin(Stdio::piped())
-                .spawn()?;
+            let mut cmd = cache.git();
+            cmd.args([
+                "log",
+                "--no-walk=unsorted",
+                "--date=iso-local",
+                "--format=%H %cd",
+                "--stdin",
+            ]);
+            if let Some(n) = max_count {
+                cmd.arg(format!("--max-count={n}"));
+            }
+            let mut child = cmd.stdin(Stdio::piped()).spawn()?;
             // We use `--stdin` to avoid possible issues from passing too many arguments.
             for sha in history.values().chain(current.values()).rev() {
                 let stdin = child.stdin.as_mut().unwrap();

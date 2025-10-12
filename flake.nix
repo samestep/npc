@@ -28,12 +28,15 @@
           src = ./.;
           strictDeps = true;
         };
+        GIT_BIN = "${pkgs.git}/bin/git";
+        NIX_BIN = "${pkgs.nix}/bin/nix";
       in
       {
         packages.default = craneLib.buildPackage (
           commonArgs
           // {
             cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+            inherit GIT_BIN NIX_BIN;
           }
         );
         devShells.default = pkgs.mkShell {
@@ -41,6 +44,7 @@
             pkgs.nixfmt
             pkgs.rust-bin.stable.latest.default
           ];
+          inherit GIT_BIN NIX_BIN;
         };
       }
     );

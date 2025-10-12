@@ -22,8 +22,8 @@ use thiserror::Error;
 /// The name of this program.
 const NAME: &str = env!("CARGO_PKG_NAME");
 
-const GIT: &str = "git";
-const NIX: &str = "nix";
+const GIT: &str = env!("GIT_BIN");
+const NIX: &str = env!("NIX_BIN");
 
 const REMOTES: &str = "
 origin\thttps://github.com/NixOS/nixpkgs.git (fetch)

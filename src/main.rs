@@ -532,6 +532,14 @@ impl Bisection {
             "bisection state broken; please run `{NAME} bisect reset`"
         )))
     }
+
+    fn print(&self) {
+        print!("bisecting {}", self.channel);
+        match &self.input {
+            None => println!(),
+            Some(input) => println!(" for flake input {input}"),
+        }
+    }
 }
 
 /// Nixpkgs channel history CLI
@@ -669,6 +677,13 @@ async fn main() -> anyhow::Result<()> {
             bail!("cache missing; please run `{NAME} fetch`");
         }
         (Ok(cache), Commands::Status) => {
+            if let Ok(cwd) = env::current_dir()
+                && let Ok(bisection) = Bisection::new(&cache.path(CacheKey::Bisect(&cwd)))
+            {
+                bisection.print();
+                println!();
+            }
+
             let width = 21;
             let message1 = "current local time is";
             let message2 = "last fetched cache at";
@@ -762,6 +777,7 @@ async fn main() -> anyhow::Result<()> {
                     };
                     let json = push_newline(serde_json::to_string_pretty(&bisection)?);
                     fs::write(path, json)?;
+                    bisection.print();
                     Ok(())
                 }
                 Bisect::Bad { rev } => {

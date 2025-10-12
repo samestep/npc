@@ -575,15 +575,16 @@ impl FlakeLock {
         Err(err.context("`flake.lock` broken"))
     }
 
-    fn resolve(&self, path: &[String]) -> anyhow::Result<&str> {
+    fn resolve(&self, path: &[impl AsRef<str>]) -> anyhow::Result<&str> {
         let mut key: &str = &self.root;
         for name in path {
+            let name = name.as_ref();
             let Some(FlakeNode {
                 inputs: Some(inputs),
                 ..
             }) = self.nodes.get(key)
             else {
-                bail!("node {key} in `flake.lock` has no inputs");
+                bail!("could not find inputs for node {key} in `flake.lock`");
             };
             match inputs.get(name) {
                 None => bail!("node {key} in `flake.lock` has no input named {name}"),
@@ -635,10 +636,8 @@ fn resolve(
         (None, None, None) => bail!("no `flake.lock` found; please specify a branch"),
         (Some(branch), None, _) => Ok((branch, None)),
         (None, Some(name), Some(mut flake_lock)) => {
-            let array = [name];
-            let key = flake_lock.resolve(&array)?;
-            // Get back the `String` we passed in via the array because we need it later.
-            let [name] = array;
+            let parts: Vec<_> = name.split('/').collect();
+            let key = flake_lock.resolve(&parts)?;
             let Some(index) = flake_lock.nodes.get_index_of(key) else {
                 bail!("no node named {key} in `flake.lock`");
             };

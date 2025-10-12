@@ -707,20 +707,25 @@ async fn main() -> anyhow::Result<()> {
             let channel = channel.map(|name| Channel::from_str(&name)).transpose()?;
             let (channel, _) = resolve(channel, input)?;
             let commits = cache.channel(channel)?;
-            let mut cmd = cache.git();
-            cmd.args([
-                "log",
-                "--no-walk=unsorted",
-                "--date=iso-local",
-                "--format=%H %cd",
-                "--stdin",
-            ]);
-            if let Some(n) = max_count {
-                cmd.arg(format!("--max-count={n}"));
-            }
-            let mut child = cmd.stdin(Stdio::piped()).spawn()?;
-            // We use `--stdin` to avoid possible issues from passing too many arguments.
-            for sha in commits.keys().rev() {
+            let mut child = cache
+                .git()
+                .args([
+                    "log",
+                    "--no-walk=unsorted",
+                    "--date=iso-local",
+                    "--format=%H %cd",
+                    "--stdin",
+                ])
+                // We use `--stdin` to avoid possible issues from passing too many arguments.
+                .stdin(Stdio::piped())
+                .spawn()?;
+            // We can't just forward `--max-count` straight through to Git, because that causes it
+            // to ignore the `--no-walk` argument.
+            for sha in commits
+                .keys()
+                .rev()
+                .take(max_count.unwrap_or(commits.len()))
+            {
                 let stdin = child.stdin.as_mut().unwrap();
                 stdin.write_all(sha.to_string().as_bytes())?;
                 stdin.write_all("\n".as_bytes())?;

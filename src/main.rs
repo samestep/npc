@@ -553,7 +553,7 @@ enum Commands {
     Status,
 
     /// List commits for an unstable channel in reverse chronological order
-    List {
+    Log {
         channel: Option<String>,
 
         #[clap(long)]
@@ -699,7 +699,7 @@ async fn main() -> anyhow::Result<()> {
         }
         (
             Ok(cache),
-            Commands::List {
+            Commands::Log {
                 channel,
                 input,
                 max_count,

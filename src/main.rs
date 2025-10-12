@@ -45,7 +45,12 @@ const RELEASES: &[&str] = &[
 
 const NEXT_RELEASE: &str = "25.11";
 
-fn trim_newline(mut string: String) -> anyhow::Result<String> {
+fn push_newline(mut string: String) -> String {
+    string.push('\n');
+    string
+}
+
+fn pop_newline(mut string: String) -> anyhow::Result<String> {
     if string.pop() != Some('\n') {
         bail!("expected trailing newline");
     }
@@ -198,7 +203,7 @@ impl Cache {
         let mut missing_other = false;
 
         let last_fetched = match fs::read_to_string(dir.join(CacheKey::LastFetched.name())) {
-            Ok(datetime) => Some(trim_newline(datetime)?),
+            Ok(datetime) => Some(pop_newline(datetime)?),
             Err(err) => match err.kind() {
                 io::ErrorKind::NotFound => None,
                 _ => bail!(err),
@@ -264,7 +269,7 @@ impl Cache {
         if !output.status.success() {
             bail!("failed to disambiguate Nixpkgs commit {rev}");
         }
-        Ok(trim_newline(String::from_utf8(output.stdout)?)?.parse()?)
+        Ok(pop_newline(String::from_utf8(output.stdout)?)?.parse()?)
     }
 
     fn channel(&self, channel: Channel) -> anyhow::Result<History> {
@@ -300,7 +305,7 @@ impl Remote {
         let short = &prefix[dot + 1..prefix.len() - 1];
         let output = self.cache.git().args(["rev-parse", short]).output()?;
         let string = if output.status.success() {
-            trim_newline(String::from_utf8(output.stdout)?)?
+            pop_newline(String::from_utf8(output.stdout)?)?
         } else {
             let key = format!("{prefix}git-revision");
             let output = self.s3.get_object().bucket(BUCKET).key(key).send().await?;
@@ -355,8 +360,7 @@ impl Remote {
             spinner.set_message(format!("{channel}: {} commits", pairs.len()));
         })
         .await?;
-        let mut json = serde_json::to_string_pretty(&pairs)?;
-        json.push('\n');
+        let json = push_newline(serde_json::to_string_pretty(&pairs)?);
         spinner.finish();
         Ok(json)
     }
@@ -656,9 +660,8 @@ async fn main() -> anyhow::Result<()> {
                 bail!("failed to fetch from Git");
             }
             let path = remote.cache.path(CacheKey::LastFetched);
-            let mut last_fetched = remote.cache.last_fetched;
-            last_fetched.push('\n');
-            fs::write(path, last_fetched)?;
+            let json = push_newline(remote.cache.last_fetched);
+            fs::write(path, json)?;
             Ok(())
         }
         (_, Commands::Clean) => unreachable!(),
@@ -687,7 +690,7 @@ async fn main() -> anyhow::Result<()> {
                         if !output.status.success() {
                             bail!("failed to show Git commit date");
                         }
-                        let date = trim_newline(String::from_utf8(output.stdout)?)?;
+                        let date = pop_newline(String::from_utf8(output.stdout)?)?;
                         println!("{channel:<width$} {date}");
                     }
                 }
@@ -757,8 +760,7 @@ async fn main() -> anyhow::Result<()> {
                         bad: IndexSet::new(),
                         good: IndexSet::new(),
                     };
-                    let mut json = serde_json::to_string_pretty(&bisection)?;
-                    json.push('\n');
+                    let json = push_newline(serde_json::to_string_pretty(&bisection)?);
                     fs::write(path, json)?;
                     Ok(())
                 }
@@ -773,8 +775,7 @@ async fn main() -> anyhow::Result<()> {
                         (None, None) => bail!("please specify a commit"),
                     };
                     bisection.bad.insert(rev);
-                    let mut json = serde_json::to_string_pretty(&bisection)?;
-                    json.push('\n');
+                    let json = push_newline(serde_json::to_string_pretty(&bisection)?);
                     fs::write(path, json)?;
                     // TODO: Update `flake.lock` with a different Nixpkgs commit.
                     Ok(())
@@ -790,8 +791,7 @@ async fn main() -> anyhow::Result<()> {
                         (None, None) => bail!("please specify a commit"),
                     };
                     bisection.good.insert(rev);
-                    let mut json = serde_json::to_string_pretty(&bisection)?;
-                    json.push('\n');
+                    let json = push_newline(serde_json::to_string_pretty(&bisection)?);
                     fs::write(path, json)?;
                     // TODO: Update `flake.lock` with a different Nixpkgs commit.
                     Ok(())

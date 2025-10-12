@@ -180,6 +180,8 @@ impl CacheKey<'_> {
     }
 }
 
+type History = IndexMap<Sha, String>;
+
 struct PartialCache {
     dir: PathBuf,
     missing_git: bool,
@@ -265,12 +267,12 @@ impl Cache {
         Ok(trim_newline(String::from_utf8(output.stdout)?)?.parse()?)
     }
 
-    fn channel(&self, channel: Channel) -> anyhow::Result<IndexMap<String, Sha>> {
-        let mut commits: IndexMap<String, Sha> = serde_json::from_str(channel.history()).unwrap();
-        let current: IndexMap<String, Sha> =
+    fn channel(&self, channel: Channel) -> anyhow::Result<History> {
+        let mut commits: History = serde_json::from_str(channel.history()).unwrap();
+        let current: History =
             serde_json::from_str(&fs::read_to_string(self.path(channel.key()))?)?;
-        for (prefix, sha) in current {
-            commits.insert(prefix, sha);
+        for (sha, prefix) in current {
+            commits.insert(sha, prefix);
         }
         Ok(commits)
     }
@@ -311,7 +313,7 @@ impl Remote {
         &self,
         channel: Channel,
         releases: impl IntoIterator<Item = &str>,
-        mut callback: impl FnMut(String, Sha),
+        mut callback: impl FnMut(Sha, String),
     ) -> anyhow::Result<()> {
         for release in releases {
             let mut continuation_token = None;
@@ -328,7 +330,7 @@ impl Remote {
                 for item in output.common_prefixes.unwrap_or_default() {
                     let prefix = item.prefix.ok_or_else(|| anyhow!("missing prefix"))?;
                     let sha = self.git_revision(&prefix).await?;
-                    callback(prefix, sha);
+                    callback(sha, prefix);
                 }
                 match output.next_continuation_token {
                     Some(token) => continuation_token = Some(token),
@@ -347,9 +349,9 @@ impl Remote {
         let spinner = ProgressBar::new_spinner();
         spinner.set_message(<&str>::from(channel));
         spinner.enable_steady_tick(Duration::from_millis(100));
-        let mut pairs = IndexMap::new();
-        self.list_revisions(channel, releases, |prefix, sha| {
-            pairs.insert(prefix, sha);
+        let mut pairs = History::new();
+        self.list_revisions(channel, releases, |sha, prefix| {
+            pairs.insert(sha, prefix);
             spinner.set_message(format!("{channel}: {} commits", pairs.len()));
         })
         .await?;
@@ -678,7 +680,7 @@ async fn main() -> anyhow::Result<()> {
                 assert!(<&str>::from(channel).len() <= width);
                 match cache.channel(channel)?.last() {
                     None => println!("{channel}"),
-                    Some((_, sha)) => {
+                    Some((sha, _)) => {
                         let output = cache
                             .git()
                             .args(["show", "--no-patch", "--date=iso-local", "--format=%cd"])
@@ -718,7 +720,7 @@ async fn main() -> anyhow::Result<()> {
             }
             let mut child = cmd.stdin(Stdio::piped()).spawn()?;
             // We use `--stdin` to avoid possible issues from passing too many arguments.
-            for sha in commits.values().rev() {
+            for sha in commits.keys().rev() {
                 let stdin = child.stdin.as_mut().unwrap();
                 stdin.write_all(sha.to_string().as_bytes())?;
                 stdin.write_all("\n".as_bytes())?;
@@ -739,11 +741,7 @@ async fn main() -> anyhow::Result<()> {
             let (channel, Some(input)) = resolve(channel, input)? else {
                 bail!("could not determine flake input to update");
             };
-            if !cache
-                .channel(channel)?
-                .into_values()
-                .any(|commit| sha == commit)
-            {
+            if !cache.channel(channel)?.contains_key(&sha) {
                 bail!("the history of {channel} does not contain commit {sha}");
             };
             flake_update(&input.name, sha)?;

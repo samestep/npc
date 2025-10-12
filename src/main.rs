@@ -528,6 +528,7 @@ impl Bisection {
     }
 }
 
+/// Nixpkgs channel history CLI
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]

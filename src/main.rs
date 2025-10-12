@@ -563,8 +563,6 @@ enum Commands {
     Checkout {
         rev: String,
 
-        channel: Option<String>,
-
         #[clap(long)]
         input: Option<String>,
     },
@@ -733,17 +731,9 @@ async fn main() -> anyhow::Result<()> {
             child.wait()?;
             Ok(())
         }
-        (
-            Ok(cache),
-            Commands::Checkout {
-                rev,
-                channel,
-                input,
-            },
-        ) => {
+        (Ok(cache), Commands::Checkout { rev, input }) => {
             let sha = cache.sha(&rev)?;
-            let channel = channel.map(|name| Channel::from_str(&name)).transpose()?;
-            let (channel, Some(input)) = resolve(channel, input)? else {
+            let (channel, Some(input)) = resolve(None, input)? else {
                 bail!("could not determine flake input to update");
             };
             if !cache.channel(channel)?.contains_key(&sha) {

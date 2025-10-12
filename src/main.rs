@@ -12,7 +12,7 @@ use anyhow::{Context, anyhow, bail};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3 as s3;
 use clap::{Parser, Subcommand};
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use indicatif::ProgressBar;
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Visitor};
@@ -68,7 +68,7 @@ fn now() -> String {
 #[error("invalid Git SHA")]
 struct ParseShaError;
 
-#[derive(Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Sha([u8; 20]);
 
 impl fmt::Display for Sha {
@@ -280,6 +280,69 @@ impl Cache {
             commits.insert(sha, prefix);
         }
         Ok(commits)
+    }
+
+    fn mark(
+        &self,
+        path: &Path,
+        rev: Option<Sha>,
+        mark: impl FnOnce(&mut Bisection, Sha, usize),
+    ) -> anyhow::Result<()> {
+        let mut bisection = Bisection::new(path)?;
+        let rev = match rev {
+            // Explicit commit from the CLI takes precedence over current flake input.
+            Some(rev) => rev,
+            None => match bisection.input {
+                None => bail!("please specify a commit"),
+                Some(input) => {
+                    // The `resolve` function doesn't allow both channel and input to be `Some`.
+                    let (_, input) = resolve(None, Some(input))?;
+                    // The returned input could only be `None` if we had given a `None` input.
+                    let FlakeInput { name, rev } = input.unwrap();
+                    bisection.input = Some(name); // Restore the field we took earlier.
+                    rev
+                }
+            },
+        };
+        let channel = bisection.channel;
+        let commits = self.channel(channel)?;
+        let Some(index) = commits.get_index_of(&rev) else {
+            bail!("{rev} not found in history of {channel}");
+        };
+        mark(&mut bisection, rev, index);
+        if let BisectStatus {
+            first_bad: Some((sha_bad, index_bad)),
+            last_good: Some((sha_good, index_good)),
+            done,
+        } = bisection.status()
+        {
+            if index_bad == index_good {
+                bail!("{sha_bad} marked both good and bad");
+            } else if index_bad < index_good {
+                bail!("{sha_bad} marked bad but is earlier than good commit {sha_good}");
+            } else if done {
+                bisection.next = None;
+            } else {
+                let Some((&sha, _)) = commits.get_index(index_good.midpoint(index_bad)) else {
+                    bail!("midpoint commit not found in history of {channel}");
+                };
+                bisection.next = Some(sha);
+            }
+        }
+        let json = push_newline(serde_json::to_string_pretty(&bisection)?);
+        fs::write(path, json)?;
+        bisection.print();
+        if let Some(input) = &bisection.input {
+            let status = bisection.status();
+            if status.done
+                && let Some((good, _)) = status.last_good
+            {
+                flake_update(input, good)?;
+            } else if let Some(next) = bisection.next {
+                flake_update(input, next)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -506,12 +569,23 @@ fn flake_update(name: &str, sha: Sha) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct BisectStatus {
+    /// The first known bad commit.
+    first_bad: Option<(Sha, usize)>,
+
+    /// The last known good commit.
+    last_good: Option<(Sha, usize)>,
+
+    done: bool,
+}
+
 #[derive(Deserialize, Serialize)]
 struct Bisection {
     channel: Channel,
     input: Option<String>,
-    bad: IndexSet<Sha>,
-    good: IndexSet<Sha>,
+    bad: IndexMap<Sha, usize>,
+    good: IndexMap<Sha, usize>,
+    next: Option<Sha>,
 }
 
 impl Bisection {
@@ -533,11 +607,67 @@ impl Bisection {
         )))
     }
 
+    fn status(&self) -> BisectStatus {
+        let first_bad = self
+            .bad
+            .iter()
+            .map(|(&sha, &i)| (sha, i))
+            .min_by_key(|&(_, i)| i);
+        let last_good = self
+            .good
+            .iter()
+            .map(|(&sha, &i)| (sha, i))
+            .max_by_key(|&(_, i)| i);
+        let mut done = false;
+        if let (Some((_, bad)), Some((_, good))) = (first_bad, last_good)
+            && bad == good + 1
+        {
+            done = true;
+        }
+        BisectStatus {
+            first_bad,
+            last_good,
+            done,
+        }
+    }
+
     fn print(&self) {
+        let status = self.status();
+        if status.done {
+            print!("done ");
+        }
         print!("bisecting {}", self.channel);
         match &self.input {
             None => println!(),
             Some(input) => println!(" for flake input {input}"),
+        }
+        match (status.first_bad, status.last_good) {
+            (None, None) => println!("waiting for both good and bad commits"),
+            (Some(_), None) => println!("waiting for good commit(s), bad commit known"),
+            (None, Some(_)) => println!("waiting for bad commit(s), good commit known"),
+            (Some((sha_bad, index_bad)), Some((sha_good, index_good))) => {
+                if status.done {
+                    println!("{sha_bad} is the first bad commit");
+                    println!("{sha_good} is the last good commit");
+                } else if let Some(next) = self.next
+                    && let Some(commits) = index_bad.checked_sub(index_good + 1)
+                {
+                    let steps = (commits as f64).log2().ceil() as usize;
+                    print!("{next} is the next commit; {commits} commit");
+                    if commits != 1 {
+                        print!("s");
+                    }
+                    print!(" remain");
+                    if commits == 1 {
+                        print!("s");
+                    }
+                    print!(" (roughly {steps} more step");
+                    if steps != 1 {
+                        print!("s");
+                    }
+                    println!(")");
+                }
+            }
         }
     }
 }
@@ -755,7 +885,7 @@ async fn main() -> anyhow::Result<()> {
                 bail!("could not determine flake input to update");
             };
             if !cache.channel(channel)?.contains_key(&sha) {
-                bail!("the history of {channel} does not contain commit {sha}");
+                bail!("{sha} not found in history of {channel}");
             };
             flake_update(&input.name, sha)?;
             Ok(())
@@ -772,8 +902,9 @@ async fn main() -> anyhow::Result<()> {
                     let bisection = Bisection {
                         channel,
                         input: input.map(|input| input.name),
-                        bad: IndexSet::new(),
-                        good: IndexSet::new(),
+                        bad: IndexMap::new(),
+                        good: IndexMap::new(),
+                        next: None,
                     };
                     let json = push_newline(serde_json::to_string_pretty(&bisection)?);
                     fs::write(path, json)?;
@@ -782,34 +913,16 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Bisect::Bad { rev } => {
                     let rev = rev.map(|rev| cache.sha(&rev)).transpose()?;
-                    let mut bisection = Bisection::new(&path)?;
-                    let (_, input) = resolve(Some(bisection.channel), bisection.input.clone())?;
-                    let rev = match (rev, input) {
-                        (Some(rev), _) => rev,
-                        // Explicit commit from the CLI takes precedence over current flake input.
-                        (None, Some(input)) => input.rev,
-                        (None, None) => bail!("please specify a commit"),
-                    };
-                    bisection.bad.insert(rev);
-                    let json = push_newline(serde_json::to_string_pretty(&bisection)?);
-                    fs::write(path, json)?;
-                    // TODO: Update `flake.lock` with a different Nixpkgs commit.
+                    cache.mark(&path, rev, |bisection, rev, index| {
+                        bisection.bad.insert(rev, index);
+                    })?;
                     Ok(())
                 }
                 Bisect::Good { rev } => {
                     let rev = rev.map(|rev| cache.sha(&rev)).transpose()?;
-                    let mut bisection = Bisection::new(&path)?;
-                    let (_, input) = resolve(Some(bisection.channel), bisection.input.clone())?;
-                    let rev = match (rev, input) {
-                        (Some(rev), _) => rev,
-                        // Explicit commit from the CLI takes precedence over current flake input.
-                        (None, Some(input)) => input.rev,
-                        (None, None) => bail!("please specify a commit"),
-                    };
-                    bisection.good.insert(rev);
-                    let json = push_newline(serde_json::to_string_pretty(&bisection)?);
-                    fs::write(path, json)?;
-                    // TODO: Update `flake.lock` with a different Nixpkgs commit.
+                    cache.mark(&path, rev, |bisection, rev, index| {
+                        bisection.good.insert(rev, index);
+                    })?;
                     Ok(())
                 }
                 Bisect::Reset => fs::remove_file(path).or_else(|err| match err.kind() {

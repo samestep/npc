@@ -534,21 +534,37 @@ enum FlakeLocked {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum FlakePath {
+    Direct(String),
+    Indirect(Vec<String>),
+}
+
+#[derive(Debug, Deserialize)]
 struct FlakeNode {
     original: Option<FlakeOriginal>,
     locked: Option<FlakeLocked>,
+    inputs: Option<IndexMap<String, FlakePath>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct FlakeLock {
+    version: usize,
     nodes: IndexMap<String, FlakeNode>,
+    root: String,
 }
 
 impl FlakeLock {
     fn new() -> anyhow::Result<Option<Self>> {
         let err = match fs::read_to_string("flake.lock") {
-            Ok(json) => match serde_json::from_str(&json) {
-                Ok(flake_lock) => return Ok(Some(flake_lock)),
+            Ok(json) => match serde_json::from_str::<FlakeLock>(&json) {
+                Ok(flake_lock) => {
+                    let v = flake_lock.version;
+                    if v != 7 {
+                        bail!("expected `flake.lock` format version 7 but this one is version {v}");
+                    }
+                    return Ok(Some(flake_lock));
+                }
                 Err(err) => anyhow!(err),
             },
             Err(err) => match err.kind() {
@@ -557,6 +573,25 @@ impl FlakeLock {
             },
         };
         Err(err.context("`flake.lock` broken"))
+    }
+
+    fn resolve(&self, path: &[String]) -> anyhow::Result<&str> {
+        let mut key: &str = &self.root;
+        for name in path {
+            let Some(FlakeNode {
+                inputs: Some(inputs),
+                ..
+            }) = self.nodes.get(key)
+            else {
+                bail!("node {key} in `flake.lock` has no inputs");
+            };
+            match inputs.get(name) {
+                None => bail!("node {key} in `flake.lock` has no input named {name}"),
+                Some(FlakePath::Direct(new_key)) => key = new_key,
+                Some(FlakePath::Indirect(path)) => key = self.resolve(path)?,
+            }
+        }
+        Ok(key)
     }
 }
 
@@ -600,7 +635,15 @@ fn resolve(
         (None, None, None) => bail!("no `flake.lock` found; please specify a branch"),
         (Some(branch), None, _) => Ok((branch, None)),
         (None, Some(name), Some(mut flake_lock)) => {
-            let Some(node) = flake_lock.nodes.swap_remove(&name) else {
+            let array = [name];
+            let key = flake_lock.resolve(&array)?;
+            // Get back the `String` we passed in via the array because we need it later.
+            let [name] = array;
+            let Some(index) = flake_lock.nodes.get_index_of(key) else {
+                bail!("no node named {key} in `flake.lock`");
+            };
+            // We use an index instead of direct `swap_remove` due to borrowing issues.
+            let Some((_, node)) = flake_lock.nodes.swap_remove_index(index) else {
                 bail!("no flake input found named {name}");
             };
             let Some((bran, rev)) = filter_node(node) else {

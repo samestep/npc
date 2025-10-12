@@ -1,6 +1,7 @@
 use std::{
     env, fmt, fs,
     io::{self, BufRead, Write},
+    iter,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -158,7 +159,7 @@ impl Channel {
     }
 
     fn key(self) -> CacheKey<'static> {
-        CacheKey::Channel(self)
+        CacheKey::Branch(Branch::Channel(self))
     }
 }
 
@@ -183,6 +184,10 @@ enum Branch {
 impl Branch {
     fn master() -> Self {
         Self::Master(Master::Master)
+    }
+
+    fn iter() -> impl Iterator<Item = Self> {
+        iter::once(Self::master()).chain(Channel::iter().map(Self::Channel))
     }
 }
 
@@ -218,7 +223,7 @@ impl FromStr for Branch {
 enum CacheKey<'a> {
     LastFetched,
     Git,
-    Channel(Channel),
+    Branch(Branch),
     Bisect(&'a Path),
 }
 
@@ -227,7 +232,8 @@ impl CacheKey<'_> {
         match self {
             Self::LastFetched => "last-fetched.txt".to_owned(),
             Self::Git => "nixpkgs.git".to_owned(),
-            Self::Channel(channel) => format!("{channel}.json"),
+            Self::Branch(Branch::Master(_)) => "master.dat".to_owned(),
+            Self::Branch(Branch::Channel(channel)) => format!("{channel}.json"),
             Self::Bisect(path) => {
                 assert!(path.is_absolute());
                 // We use percent encoding to turn an entire path into a single pathname component.
@@ -238,85 +244,7 @@ impl CacheKey<'_> {
     }
 }
 
-enum History {
-    Master(Vec<Sha>),
-    Channel(IndexMap<Sha, String>),
-}
-
-impl History {
-    fn new() -> Self {
-        Self::Channel(IndexMap::new())
-    }
-
-    fn deserialize(json: &str) -> anyhow::Result<Self> {
-        Ok(Self::Channel(serde_json::from_str(json)?))
-    }
-
-    fn serialize(&self) -> anyhow::Result<String> {
-        match self {
-            Self::Master(_) => panic!("`master` is a special case"),
-            Self::Channel(pairs) => Ok(push_newline(serde_json::to_string_pretty(&pairs)?)),
-        }
-    }
-
-    fn len(&self) -> usize {
-        match self {
-            Self::Master(shas) => shas.len(),
-            Self::Channel(pairs) => pairs.len(),
-        }
-    }
-
-    fn last(&self) -> Option<Sha> {
-        match self {
-            Self::Master(_) => panic!("`master` is a special case"),
-            Self::Channel(pairs) => pairs.last().map(|(&sha, _)| sha),
-        }
-    }
-
-    fn get_index(&self, index: usize) -> Option<Sha> {
-        match self {
-            Self::Master(shas) => shas.get(index).copied(),
-            Self::Channel(pairs) => pairs.get_index(index).map(|(&sha, _)| sha),
-        }
-    }
-
-    /// Be warned that this is linear time.
-    fn get_index_of(&self, sha: Sha) -> Option<usize> {
-        match self {
-            Self::Master(shas) => shas.iter().position(|&rev| rev == sha),
-            Self::Channel(pairs) => pairs.get_index_of(&sha),
-        }
-    }
-
-    fn contains(&self, sha: Sha) -> bool {
-        match self {
-            Self::Master(_) => panic!("`master` is a special case"),
-            Self::Channel(pairs) => pairs.contains_key(&sha),
-        }
-    }
-
-    fn insert(&mut self, sha: Sha, prefix: String) {
-        match self {
-            Self::Master(_) => panic!("`master` is a special case"),
-            Self::Channel(pairs) => {
-                pairs.insert(sha, prefix);
-            }
-        }
-    }
-}
-
-impl IntoIterator for History {
-    type Item = (Sha, String);
-
-    type IntoIter = <indexmap::IndexMap<Sha, String> as IntoIterator>::IntoIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        match self {
-            Self::Master(_) => panic!("`master` is a special case"),
-            Self::Channel(pairs) => pairs.into_iter(),
-        }
-    }
-}
+type History = Vec<Sha>;
 
 struct PartialCache {
     dir: PathBuf,
@@ -360,6 +288,10 @@ impl Cache {
             }
         } else {
             missing_git = true;
+        }
+
+        if !fs::exists(dir.join(CacheKey::Branch(Branch::master()).name()))? {
+            missing_other = true;
         }
 
         for channel in Channel::iter() {
@@ -406,27 +338,19 @@ impl Cache {
     fn branch(&self, branch: Branch) -> anyhow::Result<History> {
         match branch {
             Branch::Master(_) => {
-                let output = self
-                    .git()
-                    .args(["log", "--first-parent", "--format=%H"])
-                    .output()?;
-                if !output.status.success() {
-                    bail!("failed to list commits from Nixpkgs master branch");
+                let bytes = fs::read(self.path(CacheKey::Branch(Branch::master())))?;
+                let (chunks, rest) = bytes.as_chunks();
+                if !rest.is_empty() {
+                    bail!("broken cache for Nixpkgs master branch");
                 }
-                let mut shas = Vec::new();
-                for line in output.stdout.lines() {
-                    shas.push(line?.parse()?);
-                }
-                shas.reverse();
-                Ok(History::Master(shas))
+                Ok(chunks.iter().copied().map(Sha).collect())
             }
             Branch::Channel(channel) => {
-                let mut commits = History::deserialize(channel.history()).unwrap();
-                let current = History::deserialize(&fs::read_to_string(self.path(channel.key()))?)?;
-                for (sha, prefix) in current {
-                    commits.insert(sha, prefix);
-                }
-                Ok(commits)
+                let history: IndexMap<Sha, String> =
+                    serde_json::from_str(channel.history()).unwrap();
+                let current: IndexMap<Sha, String> =
+                    serde_json::from_str(&fs::read_to_string(self.path(channel.key()))?)?;
+                Ok(history.into_keys().chain(current.into_keys()).collect())
             }
         }
     }
@@ -455,9 +379,7 @@ impl Cache {
         };
         let branch = bisection.branch;
         let commits = self.branch(branch)?;
-        // As stated in the `get_index_of` docstring, it's not great that this is linear time, but
-        // we're only calling it once, so it's probably still better than always hashing everything.
-        let Some(index) = commits.get_index_of(rev) else {
+        let Some(index) = commits.iter().position(|&sha| sha == rev) else {
             bail!("{rev} not found in history of {branch}");
         };
         mark(&mut bisection, rev, index);
@@ -474,7 +396,7 @@ impl Cache {
             } else if done {
                 bisection.next = None;
             } else {
-                let Some(sha) = commits.get_index(index_good.midpoint(index_bad)) else {
+                let Some(&sha) = commits.get(index_good.midpoint(index_bad)) else {
                     bail!("midpoint commit not found in history of {branch}");
                 };
                 bisection.next = Some(sha);
@@ -568,13 +490,13 @@ impl Remote {
         let spinner = ProgressBar::new_spinner();
         spinner.set_message(<&str>::from(channel));
         spinner.enable_steady_tick(Duration::from_millis(100));
-        let mut pairs = History::new();
+        let mut pairs = IndexMap::new();
         self.list_revisions(channel, releases, |sha, prefix| {
             pairs.insert(sha, prefix);
             spinner.set_message(format!("{channel}: {} commits", pairs.len()));
         })
         .await?;
-        let json = pairs.serialize()?;
+        let json = push_newline(serde_json::to_string_pretty(&pairs)?);
         spinner.finish();
         Ok(json)
     }
@@ -911,6 +833,7 @@ async fn main() -> anyhow::Result<()> {
     ) {
         (cache_result, Commands::Fetch) => {
             let last_fetched = now();
+
             let cache = match cache_result {
                 Ok(mut cache) => {
                     cache.last_fetched = last_fetched;
@@ -931,11 +854,13 @@ async fn main() -> anyhow::Result<()> {
                     cache
                 }
             };
+
             let remote = Remote::new(cache).await;
             for channel in Channel::iter() {
                 let json = remote.channel_json(channel, [NEXT_RELEASE]).await?;
                 fs::write(remote.cache.path(channel.key()), json)?;
             }
+
             // We fetch from Git after fetching from S3 so that, once we're done, all the commit
             // hashes we got from S3 should also be in our local Git clone.
             let status = remote
@@ -948,9 +873,29 @@ async fn main() -> anyhow::Result<()> {
             if !status.success() {
                 bail!("failed to fetch from Git");
             }
+
+            // List `master` commits only after `git fetch` so that we don't miss any new ones.
+            let output = remote
+                .cache
+                .git()
+                .args(["log", "--first-parent", "--format=%H"])
+                .output()?;
+            if !output.status.success() {
+                bail!("failed to list commits from Nixpkgs master branch");
+            }
+            let mut shas = Vec::new();
+            for line in output.stdout.lines() {
+                let sha: Sha = line?.parse()?;
+                shas.push(sha.0);
+            }
+            shas.reverse();
+            let bytes = shas.into_flattened();
+            fs::write(remote.cache.path(CacheKey::Branch(Branch::master())), bytes)?;
+
             let path = remote.cache.path(CacheKey::LastFetched);
             let json = push_newline(remote.cache.last_fetched);
             fs::write(path, json)?;
+
             Ok(())
         }
         (_, Commands::Clean) => unreachable!(),
@@ -973,21 +918,10 @@ async fn main() -> anyhow::Result<()> {
             println!("{message1} {}", now());
             println!("{message2} {}", cache.last_fetched);
             println!();
-            {
-                let output = cache
-                    .git()
-                    .args(["show", "--no-patch", "--date=iso-local", "--format=%cd"])
-                    .output()?;
-                if !output.status.success() {
-                    bail!("failed to show Git commit date");
-                }
-                let date = pop_newline(String::from_utf8(output.stdout)?)?;
-                println!("{:<width$} {date}", Branch::master());
-            }
-            for channel in Channel::iter() {
-                assert!(<&str>::from(channel).len() <= width);
-                match cache.branch(Branch::Channel(channel))?.last() {
-                    None => println!("{channel}"),
+            for branch in Branch::iter() {
+                assert!(<&str>::from(branch).len() <= width);
+                match cache.branch(branch)?.last() {
+                    None => println!("{branch}"),
                     Some(sha) => {
                         let output = cache
                             .git()
@@ -998,7 +932,7 @@ async fn main() -> anyhow::Result<()> {
                             bail!("failed to show Git commit date");
                         }
                         let date = pop_newline(String::from_utf8(output.stdout)?)?;
-                        println!("{channel:<width$} {date}");
+                        println!("{branch:<width$} {date}");
                     }
                 }
             }
@@ -1014,61 +948,38 @@ async fn main() -> anyhow::Result<()> {
         ) => {
             let branch = branch.map(|name| name.parse()).transpose()?;
             let (branch, _) = resolve(branch, input)?;
-            match branch {
-                Branch::Master(_) => {
-                    let mut cmd = cache.git();
-                    cmd.args([
-                        "log",
-                        "--first-parent",
-                        "--date=iso-local",
-                        "--format=%H %cd",
-                    ]);
-                    if let Some(n) = max_count {
-                        cmd.arg(format!("--max-count={n}"));
-                    }
-                    cmd.status()?;
-                    Ok(())
-                }
-                Branch::Channel(_) => {
-                    let History::Channel(commits) = cache.branch(branch)? else {
-                        unreachable!();
-                    };
-                    let mut child = cache
-                        .git()
-                        .args([
-                            "log",
-                            "--no-walk=unsorted",
-                            "--date=iso-local",
-                            "--format=%H %cd",
-                            "--stdin",
-                        ])
-                        // We use `--stdin` to avoid possible issues from giving too many arguments.
-                        .stdin(Stdio::piped())
-                        .spawn()?;
-                    // We can't just forward `--max-count` straight through to Git, because that
-                    // causes it to ignore the `--no-walk` argument.
-                    for sha in commits
-                        .keys()
-                        .rev()
-                        .take(max_count.unwrap_or(commits.len()))
-                    {
-                        let stdin = child.stdin.as_mut().unwrap();
-                        stdin.write_all(sha.to_string().as_bytes())?;
-                        stdin.write_all("\n".as_bytes())?;
-                    }
-                    child.wait()?;
-                    Ok(())
-                }
+            let commits = cache.branch(branch)?;
+            let mut child = cache
+                .git()
+                .args([
+                    "log",
+                    "--no-walk=unsorted",
+                    "--date=iso-local",
+                    "--format=%H %cd",
+                    "--stdin",
+                ])
+                // We use `--stdin` to avoid possible issues from giving too many arguments.
+                .stdin(Stdio::piped())
+                .spawn()?;
+            // We can't just forward `--max-count` straight through to Git, because that causes it
+            // to ignore the `--no-walk` argument.
+            for sha in commits
+                .iter()
+                .rev()
+                .take(max_count.unwrap_or(commits.len()))
+            {
+                let stdin = child.stdin.as_mut().unwrap();
+                writeln!(stdin, "{sha}")?;
             }
+            child.wait()?;
+            Ok(())
         }
         (Ok(cache), Commands::Checkout { rev, input }) => {
             let sha = cache.sha(&rev)?;
             let (branch, Some(input)) = resolve(None, input)? else {
                 bail!("could not determine flake input to update");
             };
-            if let Branch::Channel(_) = branch
-                && !cache.branch(branch)?.contains(sha)
-            {
+            if !cache.branch(branch)?.contains(&sha) {
                 bail!("{sha} not found in history of {branch}");
             };
             flake_update(&input.name, sha)?;

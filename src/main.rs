@@ -130,7 +130,7 @@ enum Channel {
 
 impl fmt::Display for Channel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.into())
+        f.pad(self.into())
     }
 }
 

@@ -642,9 +642,7 @@ fn resolve(
                 bail!("no node named {key} in `flake.lock`");
             };
             // We use an index instead of direct `swap_remove` due to borrowing issues.
-            let Some((_, node)) = flake_lock.nodes.swap_remove_index(index) else {
-                bail!("no flake input found named {name}");
-            };
+            let (_, node) = flake_lock.nodes.swap_remove_index(index).unwrap();
             let Some((bran, rev)) = filter_node(node) else {
                 bail!("expected Nixpkgs in flake input named {name}");
             };

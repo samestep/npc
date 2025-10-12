@@ -169,7 +169,7 @@ impl CacheKey<'_> {
         match self {
             Self::LastFetched => "last-fetched.txt".to_owned(),
             Self::Git => "nixpkgs.git".to_owned(),
-            Self::Channel(channel) => format!("{}.json", <&str>::from(channel)),
+            Self::Channel(channel) => format!("{channel}.json"),
             Self::Bisect(path) => {
                 assert!(path.is_absolute());
                 // We use percent encoding to turn an entire path into a single pathname component.
@@ -344,14 +344,13 @@ impl Remote {
         channel: Channel,
         releases: impl IntoIterator<Item = &str>,
     ) -> anyhow::Result<String> {
-        let channel_name: &str = channel.into();
         let spinner = ProgressBar::new_spinner();
-        spinner.set_message(channel_name);
+        spinner.set_message(<&str>::from(channel));
         spinner.enable_steady_tick(Duration::from_millis(100));
         let mut pairs = IndexMap::new();
         self.list_revisions(channel, releases, |prefix, sha| {
             pairs.insert(prefix, sha);
-            spinner.set_message(format!("{channel_name}: {} commits", pairs.len()));
+            spinner.set_message(format!("{channel}: {} commits", pairs.len()));
         })
         .await?;
         let mut json = serde_json::to_string_pretty(&pairs)?;
@@ -675,10 +674,9 @@ async fn main() -> anyhow::Result<()> {
             println!("{message2} {}", cache.last_fetched);
             println!();
             for channel in Channel::iter() {
-                let name: &str = channel.into();
-                assert!(name.len() <= width);
+                assert!(<&str>::from(channel).len() <= width);
                 match cache.channel(channel)?.last() {
-                    None => println!("{name}"),
+                    None => println!("{channel}"),
                     Some((_, sha)) => {
                         let output = cache
                             .git()
@@ -689,7 +687,7 @@ async fn main() -> anyhow::Result<()> {
                             bail!("failed to show Git commit date");
                         }
                         let date = trim_newline(String::from_utf8(output.stdout)?)?;
-                        println!("{name:<width$} {date}");
+                        println!("{channel:<width$} {date}");
                     }
                 }
             }

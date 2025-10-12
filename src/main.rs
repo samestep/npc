@@ -1,6 +1,6 @@
 use std::{
     env, fmt, fs,
-    io::{self, Write},
+    io::{self, BufRead, Write},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -162,6 +162,59 @@ impl Channel {
     }
 }
 
+#[derive(Error, Debug)]
+#[error("invalid Nixpkgs branch name")]
+struct ParseBranchError;
+
+// This is a hack to get Serde to (de)serialize all the branch names properly.
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum Master {
+    Master,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(untagged)]
+enum Branch {
+    Master(Master),
+    Channel(Channel),
+}
+
+impl Branch {
+    fn master() -> Self {
+        Self::Master(Master::Master)
+    }
+}
+
+impl From<Branch> for &'static str {
+    fn from(branch: Branch) -> Self {
+        match branch {
+            Branch::Master(_) => "master",
+            Branch::Channel(channel) => channel.into(),
+        }
+    }
+}
+
+impl fmt::Display for Branch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad((*self).into())
+    }
+}
+
+impl FromStr for Branch {
+    type Err = ParseBranchError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "master" => Ok(Self::master()),
+            _ => match s.parse() {
+                Ok(channel) => Ok(Self::Channel(channel)),
+                Err(_) => Err(ParseBranchError),
+            },
+        }
+    }
+}
+
 enum CacheKey<'a> {
     LastFetched,
     Git,
@@ -185,7 +238,85 @@ impl CacheKey<'_> {
     }
 }
 
-type History = IndexMap<Sha, String>;
+enum History {
+    Master(Vec<Sha>),
+    Channel(IndexMap<Sha, String>),
+}
+
+impl History {
+    fn new() -> Self {
+        Self::Channel(IndexMap::new())
+    }
+
+    fn deserialize(json: &str) -> anyhow::Result<Self> {
+        Ok(Self::Channel(serde_json::from_str(json)?))
+    }
+
+    fn serialize(&self) -> anyhow::Result<String> {
+        match self {
+            Self::Master(_) => panic!("`master` is a special case"),
+            Self::Channel(pairs) => Ok(push_newline(serde_json::to_string_pretty(&pairs)?)),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Master(shas) => shas.len(),
+            Self::Channel(pairs) => pairs.len(),
+        }
+    }
+
+    fn last(&self) -> Option<Sha> {
+        match self {
+            Self::Master(_) => panic!("`master` is a special case"),
+            Self::Channel(pairs) => pairs.last().map(|(&sha, _)| sha),
+        }
+    }
+
+    fn get_index(&self, index: usize) -> Option<Sha> {
+        match self {
+            Self::Master(shas) => shas.get(index).copied(),
+            Self::Channel(pairs) => pairs.get_index(index).map(|(&sha, _)| sha),
+        }
+    }
+
+    /// Be warned that this is linear time.
+    fn get_index_of(&self, sha: Sha) -> Option<usize> {
+        match self {
+            Self::Master(shas) => shas.iter().position(|&rev| rev == sha),
+            Self::Channel(pairs) => pairs.get_index_of(&sha),
+        }
+    }
+
+    fn contains(&self, sha: Sha) -> bool {
+        match self {
+            Self::Master(_) => panic!("`master` is a special case"),
+            Self::Channel(pairs) => pairs.contains_key(&sha),
+        }
+    }
+
+    fn insert(&mut self, sha: Sha, prefix: String) {
+        match self {
+            Self::Master(_) => panic!("`master` is a special case"),
+            Self::Channel(pairs) => {
+                pairs.insert(sha, prefix);
+            }
+        }
+    }
+}
+
+impl IntoIterator for History {
+    type Item = (Sha, String);
+
+    type IntoIter = <indexmap::IndexMap<Sha, String> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Self::Master(_) => panic!("`master` is a special case"),
+            Self::Channel(pairs) => pairs.into_iter(),
+        }
+    }
+}
 
 struct PartialCache {
     dir: PathBuf,
@@ -272,14 +403,32 @@ impl Cache {
         Ok(pop_newline(String::from_utf8(output.stdout)?)?.parse()?)
     }
 
-    fn channel(&self, channel: Channel) -> anyhow::Result<History> {
-        let mut commits: History = serde_json::from_str(channel.history()).unwrap();
-        let current: History =
-            serde_json::from_str(&fs::read_to_string(self.path(channel.key()))?)?;
-        for (sha, prefix) in current {
-            commits.insert(sha, prefix);
+    fn branch(&self, branch: Branch) -> anyhow::Result<History> {
+        match branch {
+            Branch::Master(_) => {
+                let output = self
+                    .git()
+                    .args(["log", "--first-parent", "--format=%H"])
+                    .output()?;
+                if !output.status.success() {
+                    bail!("failed to list commits from Nixpkgs master branch");
+                }
+                let mut shas = Vec::new();
+                for line in output.stdout.lines() {
+                    shas.push(line?.parse()?);
+                }
+                shas.reverse();
+                Ok(History::Master(shas))
+            }
+            Branch::Channel(channel) => {
+                let mut commits = History::deserialize(channel.history()).unwrap();
+                let current = History::deserialize(&fs::read_to_string(self.path(channel.key()))?)?;
+                for (sha, prefix) in current {
+                    commits.insert(sha, prefix);
+                }
+                Ok(commits)
+            }
         }
-        Ok(commits)
     }
 
     fn mark(
@@ -295,7 +444,7 @@ impl Cache {
             None => match bisection.input {
                 None => bail!("please specify a commit"),
                 Some(input) => {
-                    // The `resolve` function doesn't allow both channel and input to be `Some`.
+                    // The `resolve` function doesn't allow both branch and input to be `Some`.
                     let (_, input) = resolve(None, Some(input))?;
                     // The returned input could only be `None` if we had given a `None` input.
                     let FlakeInput { name, rev } = input.unwrap();
@@ -304,10 +453,12 @@ impl Cache {
                 }
             },
         };
-        let channel = bisection.channel;
-        let commits = self.channel(channel)?;
-        let Some(index) = commits.get_index_of(&rev) else {
-            bail!("{rev} not found in history of {channel}");
+        let branch = bisection.branch;
+        let commits = self.branch(branch)?;
+        // As stated in the `get_index_of` docstring, it's not great that this is linear time, but
+        // we're only calling it once, so it's probably still better than always hashing everything.
+        let Some(index) = commits.get_index_of(rev) else {
+            bail!("{rev} not found in history of {branch}");
         };
         mark(&mut bisection, rev, index);
         if let BisectStatus {
@@ -323,8 +474,8 @@ impl Cache {
             } else if done {
                 bisection.next = None;
             } else {
-                let Some((&sha, _)) = commits.get_index(index_good.midpoint(index_bad)) else {
-                    bail!("midpoint commit not found in history of {channel}");
+                let Some(sha) = commits.get_index(index_good.midpoint(index_bad)) else {
+                    bail!("midpoint commit not found in history of {branch}");
                 };
                 bisection.next = Some(sha);
             }
@@ -423,7 +574,7 @@ impl Remote {
             spinner.set_message(format!("{channel}: {} commits", pairs.len()));
         })
         .await?;
-        let json = push_newline(serde_json::to_string_pretty(&pairs)?);
+        let json = pairs.serialize()?;
         spinner.finish();
         Ok(json)
     }
@@ -492,12 +643,12 @@ struct FlakeInput {
     rev: Sha,
 }
 
-fn filter_node(node: FlakeNode) -> Option<(Channel, Sha)> {
+fn filter_node(node: FlakeNode) -> Option<(Branch, Sha)> {
     if let (
         Some(FlakeOriginal::GitHub {
             owner: owner_original,
             repo: repo_original,
-            branch: Some(branch),
+            branch,
         }),
         Some(FlakeLocked::GitHub {
             owner: owner_locked,
@@ -505,35 +656,35 @@ fn filter_node(node: FlakeNode) -> Option<(Channel, Sha)> {
             rev,
         }),
     ) = (node.original, node.locked)
-        && let Ok(channel) = Channel::from_str(&branch)
+        && let Ok(branch) = branch.as_deref().unwrap_or("master").parse()
         && owner_original == "NixOS"
         && repo_original == "nixpkgs"
         && owner_locked == "NixOS"
         && repo_locked == "nixpkgs"
     {
-        Some((channel, rev))
+        Some((branch, rev))
     } else {
         None
     }
 }
 
 fn resolve(
-    channel: Option<Channel>,
+    branch: Option<Branch>,
     flake_input: Option<String>,
-) -> anyhow::Result<(Channel, Option<FlakeInput>)> {
-    match (channel, flake_input, FlakeLock::new()?) {
-        (Some(_), Some(_), _) => bail!("cannot specify both channel and `--input`"),
+) -> anyhow::Result<(Branch, Option<FlakeInput>)> {
+    match (branch, flake_input, FlakeLock::new()?) {
+        (Some(_), Some(_), _) => bail!("cannot specify both branch and `--input`"),
         (_, Some(_), None) => bail!("specified `--input` but no `flake.lock`"),
-        (None, None, None) => bail!("no `flake.lock` found; please specify a channel"),
-        (Some(channel), None, _) => Ok((channel, None)),
+        (None, None, None) => bail!("no `flake.lock` found; please specify a branch"),
+        (Some(branch), None, _) => Ok((branch, None)),
         (None, Some(name), Some(mut flake_lock)) => {
             let Some(node) = flake_lock.nodes.swap_remove(&name) else {
                 bail!("no flake input found named {name}");
             };
-            let Some((chan, rev)) = filter_node(node) else {
+            let Some((bran, rev)) = filter_node(node) else {
                 bail!("expected Nixpkgs in flake input named {name}");
             };
-            Ok((chan, Some(FlakeInput { name, rev })))
+            Ok((bran, Some(FlakeInput { name, rev })))
         }
         (None, None, Some(flake_lock)) => {
             let mut choices: Vec<_> = flake_lock
@@ -541,13 +692,13 @@ fn resolve(
                 .into_iter()
                 .filter_map(|(name, node)| Some((name, filter_node(node)?)))
                 .collect();
-            let (name, (channel, rev)) = choices
+            let (name, (branch, rev)) = choices
                 .pop()
                 .ok_or_else(|| anyhow!("no Nixpkgs input found in `flake.lock`"))?;
             if !choices.is_empty() {
                 bail!("multiple Nixpkgs inputs in `flake.lock`; please specify `--input`");
             }
-            Ok((channel, Some(FlakeInput { name, rev })))
+            Ok((branch, Some(FlakeInput { name, rev })))
         }
     }
 }
@@ -581,7 +732,7 @@ struct BisectStatus {
 
 #[derive(Deserialize, Serialize)]
 struct Bisection {
-    channel: Channel,
+    branch: Branch,
     input: Option<String>,
     bad: IndexMap<Sha, usize>,
     good: IndexMap<Sha, usize>,
@@ -636,7 +787,7 @@ impl Bisection {
         if status.done {
             print!("done ");
         }
-        print!("bisecting {}", self.channel);
+        print!("bisecting {}", self.branch);
         match &self.input {
             None => println!(),
             Some(input) => println!(" for flake input {input}"),
@@ -687,12 +838,12 @@ enum Commands {
     /// Delete the cache
     Clean,
 
-    /// Print the status of all channels in the cache
+    /// Print the status of all branches in the cache
     Status,
 
-    /// List commits for an unstable channel in reverse chronological order
+    /// List commits a branch has pointed to, in reverse chronological order
     Log {
-        channel: Option<String>,
+        branch: Option<String>,
 
         #[clap(long)]
         input: Option<String>,
@@ -709,7 +860,7 @@ enum Commands {
         input: Option<String>,
     },
 
-    /// Use binary search to find the newest historical commit of a channel before a bug
+    /// Use binary search to find the newest historical commit of a branch before a bug
     Bisect {
         #[command(subcommand)]
         bisect: Bisect,
@@ -723,7 +874,7 @@ enum Commands {
 enum Bisect {
     /// Start bisecting in this directory
     Start {
-        channel: Option<String>,
+        branch: Option<String>,
 
         #[clap(long)]
         input: Option<String>,
@@ -822,11 +973,22 @@ async fn main() -> anyhow::Result<()> {
             println!("{message1} {}", now());
             println!("{message2} {}", cache.last_fetched);
             println!();
+            {
+                let output = cache
+                    .git()
+                    .args(["show", "--no-patch", "--date=iso-local", "--format=%cd"])
+                    .output()?;
+                if !output.status.success() {
+                    bail!("failed to show Git commit date");
+                }
+                let date = pop_newline(String::from_utf8(output.stdout)?)?;
+                println!("{:<width$} {date}", Branch::master());
+            }
             for channel in Channel::iter() {
                 assert!(<&str>::from(channel).len() <= width);
-                match cache.channel(channel)?.last() {
+                match cache.branch(Branch::Channel(channel))?.last() {
                     None => println!("{channel}"),
-                    Some((sha, _)) => {
+                    Some(sha) => {
                         let output = cache
                             .git()
                             .args(["show", "--no-patch", "--date=iso-local", "--format=%cd"])
@@ -845,47 +1007,69 @@ async fn main() -> anyhow::Result<()> {
         (
             Ok(cache),
             Commands::Log {
-                channel,
+                branch,
                 input,
                 max_count,
             },
         ) => {
-            let channel = channel.map(|name| Channel::from_str(&name)).transpose()?;
-            let (channel, _) = resolve(channel, input)?;
-            let commits = cache.channel(channel)?;
-            let mut child = cache
-                .git()
-                .args([
-                    "log",
-                    "--no-walk=unsorted",
-                    "--date=iso-local",
-                    "--format=%H %cd",
-                    "--stdin",
-                ])
-                // We use `--stdin` to avoid possible issues from passing too many arguments.
-                .stdin(Stdio::piped())
-                .spawn()?;
-            // We can't just forward `--max-count` straight through to Git, because that causes it
-            // to ignore the `--no-walk` argument.
-            for sha in commits
-                .keys()
-                .rev()
-                .take(max_count.unwrap_or(commits.len()))
-            {
-                let stdin = child.stdin.as_mut().unwrap();
-                stdin.write_all(sha.to_string().as_bytes())?;
-                stdin.write_all("\n".as_bytes())?;
+            let branch = branch.map(|name| name.parse()).transpose()?;
+            let (branch, _) = resolve(branch, input)?;
+            match branch {
+                Branch::Master(_) => {
+                    let mut cmd = cache.git();
+                    cmd.args([
+                        "log",
+                        "--first-parent",
+                        "--date=iso-local",
+                        "--format=%H %cd",
+                    ]);
+                    if let Some(n) = max_count {
+                        cmd.arg(format!("--max-count={n}"));
+                    }
+                    cmd.status()?;
+                    Ok(())
+                }
+                Branch::Channel(_) => {
+                    let History::Channel(commits) = cache.branch(branch)? else {
+                        unreachable!();
+                    };
+                    let mut child = cache
+                        .git()
+                        .args([
+                            "log",
+                            "--no-walk=unsorted",
+                            "--date=iso-local",
+                            "--format=%H %cd",
+                            "--stdin",
+                        ])
+                        // We use `--stdin` to avoid possible issues from giving too many arguments.
+                        .stdin(Stdio::piped())
+                        .spawn()?;
+                    // We can't just forward `--max-count` straight through to Git, because that
+                    // causes it to ignore the `--no-walk` argument.
+                    for sha in commits
+                        .keys()
+                        .rev()
+                        .take(max_count.unwrap_or(commits.len()))
+                    {
+                        let stdin = child.stdin.as_mut().unwrap();
+                        stdin.write_all(sha.to_string().as_bytes())?;
+                        stdin.write_all("\n".as_bytes())?;
+                    }
+                    child.wait()?;
+                    Ok(())
+                }
             }
-            child.wait()?;
-            Ok(())
         }
         (Ok(cache), Commands::Checkout { rev, input }) => {
             let sha = cache.sha(&rev)?;
-            let (channel, Some(input)) = resolve(None, input)? else {
+            let (branch, Some(input)) = resolve(None, input)? else {
                 bail!("could not determine flake input to update");
             };
-            if !cache.channel(channel)?.contains_key(&sha) {
-                bail!("{sha} not found in history of {channel}");
+            if let Branch::Channel(_) = branch
+                && !cache.branch(branch)?.contains(sha)
+            {
+                bail!("{sha} not found in history of {branch}");
             };
             flake_update(&input.name, sha)?;
             Ok(())
@@ -893,14 +1077,14 @@ async fn main() -> anyhow::Result<()> {
         (Ok(cache), Commands::Bisect { bisect }) => {
             let path = cache.path(CacheKey::Bisect(&env::current_dir()?));
             match bisect {
-                Bisect::Start { channel, input } => {
+                Bisect::Start { branch, input } => {
                     if fs::exists(&path)? {
                         bail!("already bisecting here; to start anew, run `{NAME} bisect reset`");
                     }
-                    let channel = channel.map(|name| Channel::from_str(&name)).transpose()?;
-                    let (channel, input) = resolve(channel, input)?;
+                    let branch = branch.map(|name| name.parse()).transpose()?;
+                    let (branch, input) = resolve(branch, input)?;
                     let bisection = Bisection {
-                        channel,
+                        branch,
                         input: input.map(|input| input.name),
                         bad: IndexMap::new(),
                         good: IndexMap::new(),

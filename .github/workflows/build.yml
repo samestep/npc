@@ -1,0 +1,17 @@
+name: Build
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      GIT_BIN: git
+      NIX_BIN: nix
+    steps:
+      - uses: actions/checkout@v5
+      - run: cargo check
+      - run: cargo check --all-features

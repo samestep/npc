@@ -19,3 +19,7 @@ serde_json = "1"
 strum = { version = "0.27", features = ["derive"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+
+[features]
+# This feature is for generating the JSON files in `src`.
+history = []

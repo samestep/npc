@@ -38,6 +38,7 @@ const BUCKET: &str = "nix-releases";
 // This command can be used to check: `curl --head https://nix-releases.s3.amazonaws.com/`
 const REGION: Region = Region::from_static("eu-west-1");
 
+#[cfg(feature = "history")]
 // We exclude everything earlier because the bucket does not have `git-revision` objects for those.
 const RELEASES: &[&str] = &[
     "16.09", "17.03", "17.09", "18.03", "18.09", "19.03", "19.09", "20.03", "20.09", "21.03",
@@ -833,6 +834,7 @@ enum Commands {
         bisect: Bisect,
     },
 
+    #[cfg(feature = "history")]
     /// Generate JSON files for unstable channel commits before the most recent release
     History {
         /// Directory in which to generate files
@@ -1088,6 +1090,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        #[cfg(feature = "history")]
         (Ok(cache), Commands::History { dir }) => {
             let remote = Remote::new(cache).await;
             for channel in Channel::iter() {

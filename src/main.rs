@@ -669,6 +669,8 @@ fn resolve(
 fn flake_update(name: &str, sha: Sha) -> anyhow::Result<()> {
     let status = Command::new(NIX)
         .args([
+            "--extra-experimental-features",
+            "nix-command flakes",
             "flake",
             "update",
             name,

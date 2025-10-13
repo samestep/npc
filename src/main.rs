@@ -667,6 +667,8 @@ fn resolve(
 }
 
 fn flake_update(name: &str, sha: Sha) -> anyhow::Result<()> {
+    // Even if the user already has flakes enabled, our hardcoded Nix path may bypass that e.g. on
+    // Determinate Nix, so we pass flags to enable them regardless.
     let status = Command::new(NIX)
         .args([
             "--extra-experimental-features",

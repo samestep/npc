@@ -634,7 +634,7 @@ fn resolve(
     match (branch, flake_input, FlakeLock::new()?) {
         (Some(_), Some(_), _) => bail!("cannot specify both branch and `--input`"),
         (_, Some(_), None) => bail!("specified `--input` but no `flake.lock`"),
-        (None, None, None) => bail!("no `flake.lock` found; please specify a branch"),
+        (None, None, None) => bail!("no branch specified and no `flake.lock` found"),
         (Some(branch), None, _) => Ok((branch, None)),
         (None, Some(name), Some(mut flake_lock)) => {
             let parts: Vec<_> = name.split('/').collect();

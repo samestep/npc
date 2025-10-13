@@ -128,13 +128,77 @@ The subcommand names are all borrowed from similar subcommands in [Git](https://
 
 ### `npc fetch`
 
+This is the first command you need to run before you can do anything with `npc`. If you haven't run it before, it first clones the entire Nixpkgs repository, which can take a while and will use several gigabytes of disk space.
+
+All the other subcommands use this cache and don't try to update it themselves; for instance, if they see a commit that's not in the cache, they'll just give an error. You can always run `npc fetch` again to update the cache, which takes less time once you've already done it at least once: in my experience, usually it takes about a minute.
+
 ### `npc clean`
+
+The cache shouldn't end up in a broken state, but if it ever does, you can use this command to delete the whole thing. It was probably a bug in `npc`, so please [let me know](CONTRIBUTING.md)!
+
+Alternatively, if you've decided you don't want to use `npc` anymore and want to free up those several gigabytes, this command works for that too.
 
 ### `npc status`
 
+This command tells you when each Nixpkgs branch was last updated, according to whenever you last ran `npc fetch`:
+
+```
+$ npc status
+current local time is 2025-10-13 16:28:56 -0400
+last fetched cache at 2025-10-13 16:28:20 -0400
+
+master                2025-10-13 16:23:29 -0400
+nixos-unstable        2025-10-12 12:01:26 -0400
+nixos-unstable-small  2025-10-13 01:55:14 -0400
+nixpkgs-unstable      2025-10-12 04:13:11 -0400
+```
+
 ### `npc log`
 
+This command prints the history of a Nixpkgs branch:
+
+```
+$ npc log nixpkgs-unstable -n10
+832e3b6db48508ae436c2c7bfc0cf914eac6938e 2025-10-12 04:13:11 -0400
+362791944032cb532aabbeed7887a441496d5e6e 2025-10-11 02:31:15 -0400
+870493f9a8cb0b074ae5b411b2f232015db19a65 2025-10-10 09:35:32 -0400
+2dad7af78a183b6c486702c18af8a9544f298377 2025-10-08 22:37:25 -0400
+fb5cf53218b987f2703a5bbc292a030c0fe33443 2025-10-08 06:03:27 -0400
+8b5c9dd8856f0c0cf46cc91f2c21c106a9d42e25 2025-10-07 21:30:28 -0400
+bce5fe2bb998488d8e7e7856315f90496723793c 2025-10-07 04:41:47 -0400
+d7f52a7a640bc54c7bb414cca603835bf8dd4b10 2025-10-04 22:43:53 -0400
+0832d1b3a08fe4c695507a075d547ebfa818dfa0 2025-10-04 14:00:36 -0400
+0d4f673a88f8405ae14484e6a1ea870e0ba4ca26 2025-10-04 05:39:58 -0400
+```
+
+If you don't pass `-n`/`--max-count` then there will be too many commits to fit on one screen, so the Git pager will be used to let you scroll through the list of commits, search for specific commits or dates, etc.
+
+If you are in a directory that has a `flake.lock` file, you don't need to specify the branch name explicitly: `npc` will determine it automatically. There are a couple caveats to this, though:
+
+- Currently `npc` only looks for flake inputs matching that look like `github:NixOS/nixpkgs` optionally followed by some branch name, and ignores other possible ways of specifying Nixpkgs. If your flake refers to the Nixpkgs repo in a different way that you'd like `npc` to support, please [let me know](CONTRIBUTING.md)!
+
+- If your `flake.lock` file has multiple independent versions of Nixpkgs, even if they happen to currently point to the same commit, `npc` will not automatically choose one; you'll need to explicitly choose one yourself via the `--input` flag:
+
+  ```sh
+  npc log --input nixpkgs
+  ```
+
+- The `log` subcommand always just prints all the commits that a Nixpkgs branch has ever pointed to according to the `npc` cache, modulo the `-n`/`--max-count` argument. That is, it may even show commits newer than the commit you currently have in your `flake.lock`.
+
 ### `npc checkout`
+
+This command runs [`nix flake update`](https://nix.dev/manual/nix/2.32/command-ref/new-cli/nix3-flake-update) with [`--override-input`](https://nix.dev/manual/nix/2.32/command-ref/new-cli/nix3-flake-update#opt-override-input) to modify your `flake.lock` file
+
+```sh
+# Fun fact: this is the most recent commit that was on
+# all three of the `nixos-unstable`, `nixos-unstable-small`,
+# and `nixpkgs-unstable` branches. It's from 2022.
+npc checkout 1d7db1b9e4cf1ee075a9f52e5c36f7b9f4207502
+```
+
+Just like the `log` subcommand, `checkout` attempts to use your `flake.lock` automatically infer which the name of the flake input to modify. Similarly, if there are multiple instances of Nixpkgs in `flake.lock` then it will ask you to explicitly specify one.
+
+Other than saving you some typing, the primary difference between this and just running `nix flake update` yourself is that it checks whether the commit you give it is actually a commit that has been a tip of your Nixpkgs branch at some point in the past. If not, that's an error. The goal of this is to maintain consistency and reduce surprises: if your `flake.nix` says you're using the `nixos-unstable` branch, it'd be weird for your `flake.lock` to list a commit that has never been the tip of that branch.
 
 ### `npc bisect`
 

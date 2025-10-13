@@ -954,10 +954,12 @@ async fn main() -> anyhow::Result<()> {
 
             Ok(())
         }
+
         (_, Commands::Clean) => unreachable!(),
         (Err(_), _) => {
             bail!("cache missing; please run `{NAME} fetch`");
         }
+
         (Ok(cache), Commands::Status) => {
             if let Ok(cwd) = env::current_dir()
                 && let Ok(bisection) = Bisection::new(&cache.path(CacheKey::Bisect(&cwd)))
@@ -994,6 +996,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+
         (
             Ok(cache),
             Commands::Log {
@@ -1030,6 +1033,7 @@ async fn main() -> anyhow::Result<()> {
             child.wait()?;
             Ok(())
         }
+
         (Ok(cache), Commands::Checkout { rev, input }) => {
             let sha = cache.sha(&rev)?;
             let (branch, Some(input)) = resolve(None, input)? else {
@@ -1041,6 +1045,7 @@ async fn main() -> anyhow::Result<()> {
             flake_update(&input.name, sha)?;
             Ok(())
         }
+
         (Ok(cache), Commands::Bisect { bisect }) => {
             let path = cache.path(CacheKey::Bisect(&env::current_dir()?));
             match bisect {
@@ -1082,6 +1087,7 @@ async fn main() -> anyhow::Result<()> {
                 }),
             }
         }
+
         (Ok(cache), Commands::History { dir }) => {
             let remote = Remote::new(cache).await;
             for channel in Channel::iter() {

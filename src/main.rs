@@ -832,7 +832,7 @@ enum Commands {
         input: Option<String>,
     },
 
-    /// Use binary search to find the newest historical commit of a branch before a bug
+    /// Use binary search to find the newest commit of a branch before a bug
     Bisect {
         #[command(subcommand)]
         bisect: Bisect,

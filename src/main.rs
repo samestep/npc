@@ -805,20 +805,25 @@ enum Commands {
 
     /// List commits a branch has pointed to, in reverse chronological order
     Log {
+        /// Nixpkgs channel name, or `master`
         branch: Option<String>,
 
-        #[clap(long)]
+        /// Slash-separated flake input name
+        #[clap(long, value_name = "NAME")]
         input: Option<String>,
 
-        #[clap(short = 'n', long)]
+        /// Limit the number of shown commits
+        #[clap(short = 'n', long, value_name = "NUMBER")]
         max_count: Option<usize>,
     },
 
     /// Set a different Nixpkgs commit in `flake.lock`
     Checkout {
+        /// Nixpkgs Git revision
         rev: String,
 
-        #[clap(long)]
+        /// Slash-separated flake input name
+        #[clap(long, value_name = "NAME")]
         input: Option<String>,
     },
 
@@ -829,26 +834,37 @@ enum Commands {
     },
 
     /// Generate JSON files for unstable channel commits before the most recent release
-    History { dir: PathBuf },
+    History {
+        /// Directory in which to generate files
+        dir: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
 enum Bisect {
     /// Start bisecting in this directory
     Start {
+        /// Nixpkgs channel name, or `master`
         branch: Option<String>,
 
-        #[clap(long)]
+        /// Slash-separated flake input name
+        #[clap(long, value_name = "NAME")]
         input: Option<String>,
     },
 
     /// Mark this commit as "bad"
     #[command(visible_alias = "new")]
-    Bad { rev: Option<String> },
+    Bad {
+        /// Nixpkgs Git revision
+        rev: Option<String>,
+    },
 
     /// Mark this commit as "good"
     #[command(visible_alias = "old")]
-    Good { rev: Option<String> },
+    Good {
+        /// Nixpkgs Git revision
+        rev: Option<String>,
+    },
 
     /// Delete bisection state for this directory
     Reset,

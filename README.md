@@ -18,8 +18,8 @@ A CLI tool to access the history of Nixpkgs [channels](https://wiki.nixos.org/wi
   - [`npc checkout`](#npc-checkout)
   - [`npc bisect`](#npc-bisect)
     - [`npc bisect start`](#npc-bisect-start)
-    - [`npc bisect bad` / `nix bisect new`](#npc-bisect-bad--nix-bisect-new)
-    - [`npc bisect good` / `nix bisect old`](#npc-bisect-good--nix-bisect-old)
+    - [`npc bisect bad` / `npc bisect new`](#npc-bisect-bad--npc-bisect-new)
+    - [`npc bisect good` / `npc bisect old`](#npc-bisect-good--npc-bisect-old)
     - [`npc bisect reset`](#npc-bisect-reset)
 - [Contributing](#contributing)
 - [License](#license)
@@ -232,7 +232,7 @@ npc bisect start nixpkgs-unstable
 
 Note that if you specify a branch, the bisection will not use "flake mode" even if you also have a unique Nixpkgs input with that branch in `flake.lock`. Specifying a branch here will cause the other `npc bisect` commands to ignore `flake.lock` entirely.
 
-#### `npc bisect bad` / `nix bisect new`
+#### `npc bisect bad` / `npc bisect new`
 
 These subcommands are aliases of each other, just like with Git. They mark a Nixpkgs commit as being broken, or more generally, as being after the change that we are trying to pinpoint.
 
@@ -244,7 +244,7 @@ npc bisect bad
 
 However, you can always instead provide a commit explicitly.
 
-#### `npc bisect good` / `nix bisect old`
+#### `npc bisect good` / `npc bisect old`
 
 Similarly, these two subcommands let you mark a commit as not broken, or more generally, as being before the change happened.
 

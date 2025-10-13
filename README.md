@@ -18,8 +18,8 @@ A CLI tool to access the history of Nixpkgs [channels](https://wiki.nixos.org/wi
   - [`npc checkout`](#npc-checkout)
   - [`npc bisect`](#npc-bisect)
     - [`npc bisect start`](#npc-bisect-start)
-    - [`npc bisect bad`](#npc-bisect-bad)
-    - [`npc bisect good`](#npc-bisect-good)
+    - [`npc bisect bad` / `nix bisect new`](#npc-bisect-bad--nix-bisect-new)
+    - [`npc bisect good` / `nix bisect old`](#npc-bisect-good--nix-bisect-old)
     - [`npc bisect reset`](#npc-bisect-reset)
 - [Contributing](#contributing)
 - [License](#license)
@@ -173,7 +173,13 @@ d7f52a7a640bc54c7bb414cca603835bf8dd4b10 2025-10-04 22:43:53 -0400
 
 If you don't pass `-n`/`--max-count` then there will be too many commits to fit on one screen, so the Git pager will be used to let you scroll through the list of commits, search for specific commits or dates, etc.
 
-If you are in a directory that has a `flake.lock` file, you don't need to specify the branch name explicitly: `npc` will determine it automatically. There are a couple caveats to this, though:
+If you are in a directory that has a `flake.lock` file, you don't need to specify the branch name explicitly: `npc` will determine it automatically:
+
+```sh
+npc log
+```
+
+There are a couple caveats to this, though:
 
 - Currently `npc` only looks for flake inputs matching that look like `github:NixOS/nixpkgs` optionally followed by some branch name, and ignores other possible ways of specifying Nixpkgs. If your flake refers to the Nixpkgs repo in a different way that you'd like `npc` to support, please [let me know](CONTRIBUTING.md)!
 
@@ -202,13 +208,57 @@ Other than saving you some typing, the primary difference between this and just 
 
 ### `npc bisect`
 
+This is like `git bisect`, except instead finding the commit in your repository that introduced a bug, it finds the most recent Nixpkgs commit that doesn't have the bug but was at some point the tip of a given branch.
+
+The easiest way to use this is in a flake where it can automatically do the equivalent of `npc checkout` while narrowing in on a specific commit. But you can also do it without a `flake.lock` if you specify a branch; the difference is just that you'll need to explicity specify each commit, rather than `npc` automatically reading the current commit from `flake.lock` at each step.
+
+Note that if you are currently bisecting in a given directory, running `npc status` will also print the current bisection status.
+
 #### `npc bisect start`
 
-#### `npc bisect bad`
+Just like `checkout`, if you have exactly one Nixpkgs input in `flake.lock` then you don't need to specify any further information:
 
-#### `npc bisect good`
+```sh
+npc bisect start
+```
+
+If you have multiple Nixpkgs inputs then you need to specify one via `--input` on this command. Since bisection status is stored per directory, you only need to specify that when you start bisecting, and not each time you mark a commit as `bad` or `good`.
+
+Either way, that will start bisecting in "flake mode"; if you instead want to bisect outside the context of any flake, simply specify a branch:
+
+```sh
+npc bisect start nixpkgs-unstable
+```
+
+Note that if you specify a branch, the bisection will not use "flake mode" even if you also have a unique Nixpkgs input with that branch in `flake.lock`. Specifying a branch here will cause the other `npc bisect` commands to ignore `flake.lock` entirely.
+
+#### `npc bisect bad` / `nix bisect new`
+
+These subcommands are aliases of each other, just like with Git. They mark a Nixpkgs commit as being broken, or more generally, as being after the change that we are trying to pinpoint.
+
+If you are bisecting in "flake mode" then you can run this with no argument, and `npc` will read the current commit from your `flake.lock` according to whatever flake input was determined when you first started bisecting:
+
+```sh
+npc bisect bad
+```
+
+However, you can always instead provide a commit explicitly.
+
+#### `npc bisect good` / `nix bisect old`
+
+Similarly, these two subcommands let you mark a commit as not broken, or more generally, as being before the change happened.
+
+Once you have specified at least one "bad" commit and at least one "good" commit, `npc` will determine the midpoint commit in the history of the branch being bisected, according to the last good and first bad commits it has seen so far. If you are in "flake mode" then it will also do the equivalent of `npc checkout` with that midpoint commit, every time you mark any further commits as "bad" or "good".
 
 #### `npc bisect reset`
+
+Once you finish bisecting, all the state is still stored. This is to allow you to check back on the end result via the `status` subcommand if you'd like. Then whenever you're ready, you can go ahead and delete the state for the current directory:
+
+```sh
+npc bisect reset
+```
+
+The main difference from `git bisect reset` is that this only deletes the bisection state, and does not make any further modifications to your `flake.lock`. That is, it does not bring you back to the original Nixpkgs commit you were on before you started bisecting; you'd need to do that manually if you didn't want to end up on the commit that `npc bisect` found.
 
 ## Contributing
 

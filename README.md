@@ -173,7 +173,7 @@ d7f52a7a640bc54c7bb414cca603835bf8dd4b10 2025-10-04 22:43:53 -0400
 
 If you don't pass `-n`/`--max-count` then there will be too many commits to fit on one screen, so the Git pager will be used to let you scroll through the list of commits, search for specific commits or dates, etc.
 
-If you are in a directory that has a `flake.lock` file, you don't need to specify the branch name explicitly: `npc` will determine it automatically:
+If you are in a directory that has a `flake.lock` file, you don't need to specify the branch name explicitly; `npc` will determine it automatically:
 
 ```sh
 npc log
@@ -181,7 +181,7 @@ npc log
 
 There are a couple caveats to this, though:
 
-- Currently `npc` only looks for flake inputs matching that look like `github:NixOS/nixpkgs` optionally followed by some branch name, and ignores other possible ways of specifying Nixpkgs. If your flake refers to the Nixpkgs repo in a different way that you'd like `npc` to support, please [let me know](CONTRIBUTING.md)!
+- Currently `npc` only looks for flake inputs that look like `github:NixOS/nixpkgs` optionally followed by some branch name, and ignores other possible ways of specifying Nixpkgs. If your flake refers to the Nixpkgs repo in a different way that you'd like `npc` to support, please [let me know](CONTRIBUTING.md)!
 
 - If your `flake.lock` file has multiple independent versions of Nixpkgs, even if they happen to currently point to the same commit, `npc` will not automatically choose one; you'll need to explicitly choose one yourself via the `--input` flag:
 
@@ -193,7 +193,7 @@ There are a couple caveats to this, though:
 
 ### `npc checkout`
 
-This command runs [`nix flake update`](https://nix.dev/manual/nix/2.32/command-ref/new-cli/nix3-flake-update) with [`--override-input`](https://nix.dev/manual/nix/2.32/command-ref/new-cli/nix3-flake-update#opt-override-input) to modify your `flake.lock` file
+This command runs [`nix flake update`](https://nix.dev/manual/nix/2.32/command-ref/new-cli/nix3-flake-update) with [`--override-input`](https://nix.dev/manual/nix/2.32/command-ref/new-cli/nix3-flake-update#opt-override-input) to modify your `flake.lock` file:
 
 ```sh
 # Fun fact: this is the most recent commit that was on
@@ -202,7 +202,7 @@ This command runs [`nix flake update`](https://nix.dev/manual/nix/2.32/command-r
 npc checkout 1d7db1b9e4cf1ee075a9f52e5c36f7b9f4207502
 ```
 
-Just like the `log` subcommand, `checkout` attempts to use your `flake.lock` automatically infer which the name of the flake input to modify. Similarly, if there are multiple instances of Nixpkgs in `flake.lock` then it will ask you to explicitly specify one.
+Just like the `log` subcommand, `checkout` attempts to use your `flake.lock` to automatically infer the name of the flake input to modify. Similarly, if there are multiple instances of Nixpkgs in `flake.lock` then it will ask you to explicitly specify one.
 
 Other than saving you some typing, the primary difference between this and just running `nix flake update` yourself is that it checks whether the commit you give it is actually a commit that has been a tip of your Nixpkgs branch at some point in the past. If not, that's an error. The goal of this is to maintain consistency and reduce surprises: if your `flake.nix` says you're using the `nixos-unstable` branch, it'd be weird for your `flake.lock` to list a commit that has never been the tip of that branch.
 

@@ -194,6 +194,10 @@ impl Branch {
             Self::NixosUnstable => format!("nixos/unstable/nixos-{release}pre"),
             Self::NixosUnstableSmall => format!("nixos/unstable-small/nixos-{release}pre"),
             Self::NixpkgsUnstable => format!("nixpkgs/nixpkgs-{release}pre"),
+            // For the stable and stable-small channels, the prefix needs to go all the way to that
+            // dot after the second instance of the version number, because otherwise we get beta
+            // versions listed at the very end, and since we don't do any sorting, those get
+            // incorrectly treated as the latest versions of the channel.
             Self::Nixos2505 => format!("nixos/{release}/nixos-{release}."),
             Self::Nixos2505Small => format!("nixos/{release}-small/nixos-{release}."),
             Self::Nixpkgs2505Darwin => {

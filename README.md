@@ -144,13 +144,16 @@ This command tells you when each Nixpkgs branch was last updated, according to w
 
 ```
 $ npc status
-current local time is 2025-10-13 16:28:56 -0400
-last fetched cache at 2025-10-13 16:28:20 -0400
+current local time is 2025-10-14 10:58:42 -0400
+last fetched cache at 2025-10-14 10:57:55 -0400
 
-master                2025-10-13 16:23:29 -0400
+master                2025-10-14 10:32:03 -0400
 nixos-unstable        2025-10-12 12:01:26 -0400
-nixos-unstable-small  2025-10-13 01:55:14 -0400
-nixpkgs-unstable      2025-10-12 04:13:11 -0400
+nixos-unstable-small  2025-10-14 05:51:55 -0400
+nixpkgs-unstable      2025-10-13 05:56:54 -0400
+nixos-25.05           2025-10-10 19:46:02 -0400
+nixos-25.05-small     2025-10-14 05:30:46 -0400
+nixpkgs-25.05-darwin  2025-10-12 18:49:47 -0400
 ```
 
 ### `npc log`

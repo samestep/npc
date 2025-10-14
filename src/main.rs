@@ -1,7 +1,6 @@
 use std::{
     env, fmt, fs,
     io::{self, BufRead, Write},
-    iter,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -37,15 +36,6 @@ const BUCKET: &str = "nix-releases";
 // We must specify the same region as the bucket or it responds with a `PermanentRedirect` error.
 // This command can be used to check: `curl --head https://nix-releases.s3.amazonaws.com/`
 const REGION: Region = Region::from_static("eu-west-1");
-
-#[cfg(feature = "history")]
-// We exclude everything earlier because the bucket does not have `git-revision` objects for those.
-const RELEASES: &[&str] = &[
-    "16.09", "17.03", "17.09", "18.03", "18.09", "19.03", "19.09", "20.03", "20.09", "21.03",
-    "21.05", "21.11", "22.05", "22.11", "23.05", "23.11", "24.05", "24.11", "25.05",
-];
-
-const NEXT_RELEASE: &str = "25.11";
 
 fn push_newline(mut string: String) -> String {
     string.push('\n');
@@ -127,97 +117,93 @@ impl<'de> Visitor<'de> for ShaVisitor {
 #[derive(
     Clone, Copy, Deserialize, EnumIter, EnumString, Eq, IntoStaticStr, PartialEq, Serialize,
 )]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
-enum Channel {
+enum Branch {
+    #[serde(rename = "master")]
+    #[strum(serialize = "master")]
+    Master,
+
+    #[serde(rename = "nixos-unstable")]
+    #[strum(serialize = "nixos-unstable")]
     NixosUnstable,
+
+    #[serde(rename = "nixos-unstable-small")]
+    #[strum(serialize = "nixos-unstable-small")]
     NixosUnstableSmall,
+
+    #[serde(rename = "nixpkgs-unstable")]
+    #[strum(serialize = "nixpkgs-unstable")]
     NixpkgsUnstable,
+
+    #[serde(rename = "nixos-25.05")]
+    #[strum(serialize = "nixos-25.05")]
+    Nixos2505,
+
+    #[serde(rename = "nixos-25.05-small")]
+    #[strum(serialize = "nixos-25.05-small")]
+    Nixos2505Small,
+
+    #[serde(rename = "nixpkgs-25.05-darwin")]
+    #[strum(serialize = "nixpkgs-25.05-darwin")]
+    Nixpkgs2505Darwin,
 }
 
-impl fmt::Display for Channel {
+impl fmt::Display for Branch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad(self.into())
     }
 }
 
-impl Channel {
+impl Branch {
     fn history(self) -> &'static str {
         match self {
+            Self::Master => panic!("master branch has no precompiled history"),
             Self::NixosUnstable => include_str!("nixos-unstable.json"),
             Self::NixosUnstableSmall => include_str!("nixos-unstable-small.json"),
             Self::NixpkgsUnstable => include_str!("nixpkgs-unstable.json"),
+            // No precompiled history for the stable branches, but the cache treats them the same as
+            // unstable branches, so we let them call this method and just return empty JSON.
+            Self::Nixos2505 | Self::Nixos2505Small | Self::Nixpkgs2505Darwin => "{}",
+        }
+    }
+
+    #[cfg(feature = "history")]
+    fn past_releases(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Master => None,
+            // We exclude earlier releases since the bucket has no `git-revision` objects for them.
+            Self::NixosUnstable | Self::NixosUnstableSmall | Self::NixpkgsUnstable => Some(&[
+                "16.09", "17.03", "17.09", "18.03", "18.09", "19.03", "19.09", "20.03", "20.09",
+                "21.03", "21.05", "21.11", "22.05", "22.11", "23.05", "23.11", "24.05", "24.11",
+                "25.05",
+            ]),
+            Self::Nixos2505 | Self::Nixos2505Small | Self::Nixpkgs2505Darwin => None,
+        }
+    }
+
+    fn current_release(self) -> Option<&'static str> {
+        match self {
+            Self::Master => None,
+            Self::NixosUnstable | Self::NixosUnstableSmall | Self::NixpkgsUnstable => Some("25.11"),
+            Self::Nixos2505 | Self::Nixos2505Small | Self::Nixpkgs2505Darwin => Some("25.05"),
         }
     }
 
     fn prefix(self, release: &str) -> String {
-        let prefix = match self {
-            Self::NixosUnstable => "nixos/unstable/nixos",
-            Self::NixosUnstableSmall => "nixos/unstable-small/nixos",
-            Self::NixpkgsUnstable => "nixpkgs/nixpkgs",
-        };
-        format!("{prefix}-{release}pre")
+        match self {
+            Self::Master => panic!("master branch is not tracked in S3"),
+            Self::NixosUnstable => format!("nixos/unstable/nixos-{release}pre"),
+            Self::NixosUnstableSmall => format!("nixos/unstable-small/nixos-{release}pre"),
+            Self::NixpkgsUnstable => format!("nixpkgs/nixpkgs-{release}pre"),
+            Self::Nixos2505 => format!("nixos/{release}/nixos-{release}."),
+            Self::Nixos2505Small => format!("nixos/{release}-small/nixos-{release}."),
+            Self::Nixpkgs2505Darwin => {
+                format!("nixpkgs/{release}-darwin/nixpkgs-darwin-{release}pre")
+            }
+        }
     }
 
     fn key(self) -> CacheKey<'static> {
-        CacheKey::Branch(Branch::Channel(self))
-    }
-}
-
-#[derive(Error, Debug)]
-#[error("invalid Nixpkgs branch name")]
-struct ParseBranchError;
-
-// This is a hack to get Serde to (de)serialize all the branch names properly.
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum Master {
-    Master,
-}
-
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(untagged)]
-enum Branch {
-    Master(Master),
-    Channel(Channel),
-}
-
-impl Branch {
-    fn master() -> Self {
-        Self::Master(Master::Master)
-    }
-
-    fn iter() -> impl Iterator<Item = Self> {
-        iter::once(Self::master()).chain(Channel::iter().map(Self::Channel))
-    }
-}
-
-impl From<Branch> for &'static str {
-    fn from(branch: Branch) -> Self {
-        match branch {
-            Branch::Master(_) => "master",
-            Branch::Channel(channel) => channel.into(),
-        }
-    }
-}
-
-impl fmt::Display for Branch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad((*self).into())
-    }
-}
-
-impl FromStr for Branch {
-    type Err = ParseBranchError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "master" => Ok(Self::master()),
-            _ => match s.parse() {
-                Ok(channel) => Ok(Self::Channel(channel)),
-                Err(_) => Err(ParseBranchError),
-            },
-        }
+        CacheKey::Branch(self)
     }
 }
 
@@ -233,8 +219,8 @@ impl CacheKey<'_> {
         match self {
             Self::LastFetched => "last-fetched.txt".to_owned(),
             Self::Git => "nixpkgs.git".to_owned(),
-            Self::Branch(Branch::Master(_)) => "master.dat".to_owned(),
-            Self::Branch(Branch::Channel(channel)) => format!("{channel}.json"),
+            Self::Branch(Branch::Master) => "master.dat".to_owned(),
+            Self::Branch(channel) => format!("{channel}.json"),
             Self::Bisect(path) => {
                 assert!(path.is_absolute());
                 // We use percent encoding to turn an entire path into a single pathname component.
@@ -291,12 +277,8 @@ impl Cache {
             missing_git = true;
         }
 
-        if !fs::exists(dir.join(CacheKey::Branch(Branch::master()).name()))? {
-            missing_other = true;
-        }
-
-        for channel in Channel::iter() {
-            let key = channel.key();
+        for branch in Branch::iter() {
+            let key = branch.key();
             if !fs::exists(dir.join(key.name()))? {
                 missing_other = true;
             }
@@ -338,15 +320,15 @@ impl Cache {
 
     fn branch(&self, branch: Branch) -> anyhow::Result<History> {
         match branch {
-            Branch::Master(_) => {
-                let bytes = fs::read(self.path(CacheKey::Branch(Branch::master())))?;
+            Branch::Master => {
+                let bytes = fs::read(self.path(branch.key()))?;
                 let (chunks, rest) = bytes.as_chunks();
                 if !rest.is_empty() {
                     bail!("broken cache for Nixpkgs master branch");
                 }
                 Ok(chunks.iter().copied().map(Sha).collect())
             }
-            Branch::Channel(channel) => {
+            channel => {
                 let history: IndexMap<Sha, String> =
                     serde_json::from_str(channel.history()).unwrap();
                 let current: IndexMap<Sha, String> =
@@ -453,7 +435,7 @@ impl Remote {
 
     async fn list_revisions(
         &self,
-        channel: Channel,
+        channel: Branch,
         releases: impl IntoIterator<Item = &str>,
         mut callback: impl FnMut(Sha, String),
     ) -> anyhow::Result<()> {
@@ -485,7 +467,7 @@ impl Remote {
 
     async fn channel_json(
         &self,
-        channel: Channel,
+        channel: Branch,
         releases: impl IntoIterator<Item = &str>,
     ) -> anyhow::Result<String> {
         let spinner = ProgressBar::new_spinner();
@@ -918,9 +900,11 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let remote = Remote::new(cache).await;
-            for channel in Channel::iter() {
-                let json = remote.channel_json(channel, [NEXT_RELEASE]).await?;
-                fs::write(remote.cache.path(channel.key()), json)?;
+            for branch in Branch::iter() {
+                if let Some(release) = branch.current_release() {
+                    let json = remote.channel_json(branch, [release]).await?;
+                    fs::write(remote.cache.path(branch.key()), json)?;
+                }
             }
 
             // We fetch from Git after fetching from S3 so that, once we're done, all the commit
@@ -952,7 +936,7 @@ async fn main() -> anyhow::Result<()> {
             }
             shas.reverse();
             let bytes = shas.into_flattened();
-            fs::write(remote.cache.path(CacheKey::Branch(Branch::master())), bytes)?;
+            fs::write(remote.cache.path(CacheKey::Branch(Branch::Master)), bytes)?;
 
             let path = remote.cache.path(CacheKey::LastFetched);
             let json = push_newline(remote.cache.last_fetched);
@@ -1097,11 +1081,13 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "history")]
         (Ok(cache), Commands::History { dir }) => {
             let remote = Remote::new(cache).await;
-            for channel in Channel::iter() {
-                let json = remote
-                    .channel_json(channel, RELEASES.iter().copied())
-                    .await?;
-                fs::write(dir.join(channel.key().name()), json)?;
+            for branch in Branch::iter() {
+                if let Some(releases) = branch.past_releases() {
+                    let json = remote
+                        .channel_json(branch, releases.iter().copied())
+                        .await?;
+                    fs::write(dir.join(branch.key().name()), json)?;
+                }
             }
             Ok(())
         }

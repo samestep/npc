@@ -17,7 +17,7 @@ cargo run --release -- --help
 Note that there is one hidden subcommand called `history` which is used to generate the JSON files under [`src`](src):
 
 ```sh
-cargo run --all-features history src
+cargo run --release --all-features history src
 ```
 
 Also, I used [markdown-toc](https://github.com/jonschlinkert/markdown-toc) to generate the table of contents in [`README.md`](README.md); you can run it like this:

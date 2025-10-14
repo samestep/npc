@@ -167,16 +167,16 @@ impl Branch {
     }
 
     #[cfg(feature = "history")]
-    fn past_releases(self) -> Option<&'static [&'static str]> {
+    fn past_releases(self) -> &'static [&'static str] {
         match self {
-            Self::Master => None,
+            Self::Master => &[],
             // We exclude earlier releases since the bucket has no `git-revision` objects for them.
-            Self::NixosUnstable | Self::NixosUnstableSmall | Self::NixpkgsUnstable => Some(&[
+            Self::NixosUnstable | Self::NixosUnstableSmall | Self::NixpkgsUnstable => &[
                 "16.09", "17.03", "17.09", "18.03", "18.09", "19.03", "19.09", "20.03", "20.09",
                 "21.03", "21.05", "21.11", "22.05", "22.11", "23.05", "23.11", "24.05", "24.11",
                 "25.05",
-            ]),
-            Self::Nixos2505 | Self::Nixos2505Small | Self::Nixpkgs2505Darwin => None,
+            ],
+            Self::Nixos2505 | Self::Nixos2505Small | Self::Nixpkgs2505Darwin => &[],
         }
     }
 
@@ -1086,7 +1086,8 @@ async fn main() -> anyhow::Result<()> {
         (Ok(cache), Commands::History { dir }) => {
             let remote = Remote::new(cache).await;
             for branch in Branch::iter() {
-                if let Some(releases) = branch.past_releases() {
+                let releases = branch.past_releases();
+                if !releases.is_empty() {
                     let json = remote
                         .channel_json(branch, releases.iter().copied())
                         .await?;

@@ -122,29 +122,29 @@ enum Branch {
     #[strum(serialize = "master")]
     Master,
 
-    #[serde(rename = "nixos-unstable")]
-    #[strum(serialize = "nixos-unstable")]
-    NixosUnstable,
+    #[serde(rename = "nixpkgs-unstable")]
+    #[strum(serialize = "nixpkgs-unstable")]
+    NixpkgsUnstable,
 
     #[serde(rename = "nixos-unstable-small")]
     #[strum(serialize = "nixos-unstable-small")]
     NixosUnstableSmall,
 
-    #[serde(rename = "nixpkgs-unstable")]
-    #[strum(serialize = "nixpkgs-unstable")]
-    NixpkgsUnstable,
+    #[serde(rename = "nixos-unstable")]
+    #[strum(serialize = "nixos-unstable")]
+    NixosUnstable,
 
-    #[serde(rename = "nixos-25.05")]
-    #[strum(serialize = "nixos-25.05")]
-    Nixos2505,
+    #[serde(rename = "nixpkgs-25.05-darwin")]
+    #[strum(serialize = "nixpkgs-25.05-darwin")]
+    Nixpkgs2505Darwin,
 
     #[serde(rename = "nixos-25.05-small")]
     #[strum(serialize = "nixos-25.05-small")]
     Nixos2505Small,
 
-    #[serde(rename = "nixpkgs-25.05-darwin")]
-    #[strum(serialize = "nixpkgs-25.05-darwin")]
-    Nixpkgs2505Darwin,
+    #[serde(rename = "nixos-25.05")]
+    #[strum(serialize = "nixos-25.05")]
+    Nixos2505,
 }
 
 impl fmt::Display for Branch {
@@ -157,12 +157,12 @@ impl Branch {
     fn history(self) -> &'static str {
         match self {
             Self::Master => panic!("master branch has no precompiled history"),
-            Self::NixosUnstable => include_str!("nixos-unstable.json"),
-            Self::NixosUnstableSmall => include_str!("nixos-unstable-small.json"),
             Self::NixpkgsUnstable => include_str!("nixpkgs-unstable.json"),
+            Self::NixosUnstableSmall => include_str!("nixos-unstable-small.json"),
+            Self::NixosUnstable => include_str!("nixos-unstable.json"),
             // No precompiled history for the stable branches, but the cache treats them the same as
             // unstable branches, so we let them call this method and just return empty JSON.
-            Self::Nixos2505 | Self::Nixos2505Small | Self::Nixpkgs2505Darwin => "{}",
+            Self::Nixpkgs2505Darwin | Self::Nixos2505Small | Self::Nixos2505 => "{}",
         }
     }
 
@@ -171,38 +171,38 @@ impl Branch {
         match self {
             Self::Master => &[],
             // We exclude earlier releases since the bucket has no `git-revision` objects for them.
-            Self::NixosUnstable | Self::NixosUnstableSmall | Self::NixpkgsUnstable => &[
+            Self::NixpkgsUnstable | Self::NixosUnstableSmall | Self::NixosUnstable => &[
                 "16.09", "17.03", "17.09", "18.03", "18.09", "19.03", "19.09", "20.03", "20.09",
                 "21.03", "21.05", "21.11", "22.05", "22.11", "23.05", "23.11", "24.05", "24.11",
                 "25.05",
             ],
-            Self::Nixos2505 | Self::Nixos2505Small | Self::Nixpkgs2505Darwin => &[],
+            Self::Nixpkgs2505Darwin | Self::Nixos2505Small | Self::Nixos2505 => &[],
         }
     }
 
     fn current_release(self) -> Option<&'static str> {
         match self {
             Self::Master => None,
-            Self::NixosUnstable | Self::NixosUnstableSmall | Self::NixpkgsUnstable => Some("25.11"),
-            Self::Nixos2505 | Self::Nixos2505Small | Self::Nixpkgs2505Darwin => Some("25.05"),
+            Self::NixpkgsUnstable | Self::NixosUnstableSmall | Self::NixosUnstable => Some("25.11"),
+            Self::Nixpkgs2505Darwin | Self::Nixos2505Small | Self::Nixos2505 => Some("25.05"),
         }
     }
 
     fn prefix(self, release: &str) -> String {
         match self {
             Self::Master => panic!("master branch is not tracked in S3"),
-            Self::NixosUnstable => format!("nixos/unstable/nixos-{release}pre"),
-            Self::NixosUnstableSmall => format!("nixos/unstable-small/nixos-{release}pre"),
             Self::NixpkgsUnstable => format!("nixpkgs/nixpkgs-{release}pre"),
+            Self::NixosUnstableSmall => format!("nixos/unstable-small/nixos-{release}pre"),
+            Self::NixosUnstable => format!("nixos/unstable/nixos-{release}pre"),
+            Self::Nixpkgs2505Darwin => {
+                format!("nixpkgs/{release}-darwin/nixpkgs-darwin-{release}pre")
+            }
             // For the stable and stable-small channels, the prefix needs to go all the way to that
             // dot after the second instance of the version number, because otherwise we get beta
             // versions listed at the very end, and since we don't do any sorting, those get
             // incorrectly treated as the latest versions of the channel.
-            Self::Nixos2505 => format!("nixos/{release}/nixos-{release}."),
             Self::Nixos2505Small => format!("nixos/{release}-small/nixos-{release}."),
-            Self::Nixpkgs2505Darwin => {
-                format!("nixpkgs/{release}-darwin/nixpkgs-darwin-{release}pre")
-            }
+            Self::Nixos2505 => format!("nixos/{release}/nixos-{release}."),
         }
     }
 

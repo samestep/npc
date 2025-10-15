@@ -144,16 +144,16 @@ This command tells you when each Nixpkgs branch was last updated, according to w
 
 ```
 $ npc status
-current local time is 2025-10-14 10:58:42 -0400
-last fetched cache at 2025-10-14 10:57:55 -0400
+current local time is 2025-10-15 09:33:11 -0400
+last fetched cache at 2025-10-15 09:32:28 -0400
 
-master                2025-10-14 10:32:03 -0400
+master                2025-10-15 08:59:37 -0400
+nixpkgs-unstable      2025-10-14 08:01:24 -0400
+nixos-unstable-small  2025-10-14 18:01:03 -0400
 nixos-unstable        2025-10-12 12:01:26 -0400
-nixos-unstable-small  2025-10-14 05:51:55 -0400
-nixpkgs-unstable      2025-10-13 05:56:54 -0400
-nixos-25.05           2025-10-10 19:46:02 -0400
-nixos-25.05-small     2025-10-14 05:30:46 -0400
-nixpkgs-25.05-darwin  2025-10-12 18:49:47 -0400
+nixpkgs-25.05-darwin  2025-10-13 17:54:55 -0400
+nixos-25.05-small     2025-10-14 20:25:44 -0400
+nixos-25.05           2025-10-14 02:34:43 -0400
 ```
 
 ### `npc log`
@@ -162,6 +162,8 @@ This command prints the history of a Nixpkgs branch:
 
 ```
 $ npc log nixpkgs-unstable -n10
+2ea123939c5cb71d2761896c27e475aeab266364 2025-10-14 08:01:24 -0400
+c12c63cd6c5eb34c7b4c3076c6a99e00fcab86ec 2025-10-13 05:56:54 -0400
 832e3b6db48508ae436c2c7bfc0cf914eac6938e 2025-10-12 04:13:11 -0400
 362791944032cb532aabbeed7887a441496d5e6e 2025-10-11 02:31:15 -0400
 870493f9a8cb0b074ae5b411b2f232015db19a65 2025-10-10 09:35:32 -0400
@@ -170,8 +172,6 @@ fb5cf53218b987f2703a5bbc292a030c0fe33443 2025-10-08 06:03:27 -0400
 8b5c9dd8856f0c0cf46cc91f2c21c106a9d42e25 2025-10-07 21:30:28 -0400
 bce5fe2bb998488d8e7e7856315f90496723793c 2025-10-07 04:41:47 -0400
 d7f52a7a640bc54c7bb414cca603835bf8dd4b10 2025-10-04 22:43:53 -0400
-0832d1b3a08fe4c695507a075d547ebfa818dfa0 2025-10-04 14:00:36 -0400
-0d4f673a88f8405ae14484e6a1ea870e0ba4ca26 2025-10-04 05:39:58 -0400
 ```
 
 If you don't pass `-n`/`--max-count` then there will be too many commits to fit on one screen, so the Git pager will be used to let you scroll through the list of commits, search for specific commits or dates, etc.

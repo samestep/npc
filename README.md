@@ -1,6 +1,6 @@
 # `npc`
 
-A CLI tool to access the history of Nixpkgs [channels](https://wiki.nixos.org/wiki/Channel_branches).
+A CLI tool to access the history of Nixpkgs [channels](https://wiki.nixos.org/wiki/Channel_branches). For example, here's a terminal session using `npc` and [direnv](https://direnv.net/) to bisect `nixpkgs-unstable` for a dev shell in a flake:
 
 ![example bisect session](example.svg)
 

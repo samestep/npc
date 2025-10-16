@@ -128,7 +128,7 @@ The subcommand names are all borrowed from similar subcommands in [Git](https://
 
 ### `npc fetch`
 
-This is the first command you need to run before you can do anything with `npc`. If you haven't run it before, it first clones the Nixpkgs repository, which can take a little while and will use a couple gigabytes of disk space.
+This is the first command you need to run before you can do anything with `npc`. If you haven't run it before, it first clones the Nixpkgs repository, which can take a little while and will use up to a gigabyte of disk space.
 
 All the other subcommands use this cache and don't try to update it themselves; for instance, if they see a commit that's not in the cache, they'll just give an error. You can always run `npc fetch` again to update the cache, which takes less time once you've already done it at least once: in my experience, usually it takes about a minute.
 
@@ -136,7 +136,7 @@ All the other subcommands use this cache and don't try to update it themselves; 
 
 The cache shouldn't end up in a broken state, but if it ever does, you can use this command to delete the whole thing. It was probably a bug in `npc`, so please [let me know](CONTRIBUTING.md)!
 
-Alternatively, if you've decided you don't want to use `npc` anymore and want to free up those couple gigabytes, this command works for that too.
+Alternatively, if you've decided you don't want to use `npc` anymore and want to free up that gigabyte, this command works for that too.
 
 ### `npc status`
 

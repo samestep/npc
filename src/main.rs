@@ -26,7 +26,7 @@ const GIT: &str = env!("GIT_BIN");
 const NIX: &str = env!("NIX_BIN");
 
 const REMOTES: &str = "
-origin\thttps://github.com/NixOS/nixpkgs.git (fetch) [blob:none]
+origin\thttps://github.com/NixOS/nixpkgs.git (fetch) [tree:0]
 origin\thttps://github.com/NixOS/nixpkgs.git (push)
 "
 .trim_ascii_start();
@@ -897,9 +897,9 @@ async fn main() -> anyhow::Result<()> {
                     let cache = Cache { dir, last_fetched };
                     if missing_git {
                         let repo = "https://github.com/NixOS/nixpkgs.git";
-                        // We shouldn't need any blobs, only history information.
+                        // We shouldn't need any trees or blobs, only history information.
                         let status = Command::new(GIT)
-                            .args(["clone", "--mirror", "--filter=blob:none", repo])
+                            .args(["clone", "--mirror", "--filter=tree:0", repo])
                             .arg(cache.path(CacheKey::Git))
                             .status()?;
                         if !status.success() {

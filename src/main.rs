@@ -306,7 +306,13 @@ impl Cache {
 
     fn git(&self) -> Command {
         let mut cmd = Command::new(GIT);
-        cmd.arg("-C").arg(self.path(CacheKey::Git));
+        // Because we did a blobless clone, some commands that wouldn't normally need network access
+        // might try to lazily fetch objects. We consider it a bug for subcommands other than
+        // `fetch` to access the network (modulo `nix flake update` as used by the `checkout` and
+        // `bisect` subcommands), so here we disallow that. Unfortunately this seems to cause Git to
+        // hang rather than simply exiting with an error, but it's better than nothing.
+        cmd.args(["--no-lazy-fetch", "-C"])
+            .arg(self.path(CacheKey::Git));
         cmd
     }
 
@@ -891,6 +897,7 @@ async fn main() -> anyhow::Result<()> {
                     let cache = Cache { dir, last_fetched };
                     if missing_git {
                         let repo = "https://github.com/NixOS/nixpkgs.git";
+                        // We shouldn't need any blobs, only history information.
                         let status = Command::new(GIT)
                             .args(["clone", "--mirror", "--filter=blob:none", repo])
                             .arg(cache.path(CacheKey::Git))
@@ -975,9 +982,11 @@ async fn main() -> anyhow::Result<()> {
                 match cache.branch(branch)?.last() {
                     None => println!("{branch}"),
                     Some(sha) => {
+                        // We must use `log` instead of `show --no-patch` because the latter would
+                        // attempt to access the network.
                         let output = cache
                             .git()
-                            .args(["show", "--no-patch", "--date=iso-local", "--format=%cd"])
+                            .args(["log", "--max-count=1", "--date=iso-local", "--format=%cd"])
                             .arg(sha.to_string())
                             .output()?;
                         if !output.status.success() {

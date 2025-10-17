@@ -7,6 +7,10 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # This is the last `nixpkgs-unstable` commit with a Git version earlier than
+    # v2.48.0, which introduced a bug that sometimes causes `git fetch` to fail
+    # on partial clones like the one `npc` uses.
+    nixpkgs-git-2-47-2.url = "github:NixOS/nixpkgs/dad564433178067be1fbdfcce23b546254b6d641";
   };
   outputs =
     {
@@ -15,6 +19,7 @@
       flake-utils,
       crane,
       rust-overlay,
+      nixpkgs-git-2-47-2,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -28,7 +33,7 @@
           src = ./.;
           strictDeps = true;
         };
-        GIT_BIN = "${pkgs.git}/bin/git";
+        GIT_BIN = "${(import nixpkgs-git-2-47-2 { inherit system; }).git}/bin/git";
         NIX_BIN = "${pkgs.nix}/bin/nix";
       in
       {

@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     env, fmt, fs,
     io::{self, BufRead, Write},
     os::unix::ffi::OsStrExt,
@@ -12,8 +13,9 @@ use anyhow::{Context, anyhow, bail};
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3 as s3;
 use clap::{Parser, Subcommand};
+use futures::future::try_join_all;
 use indexmap::IndexMap;
-use indicatif::ProgressBar;
+use indicatif::{MultiProgress, ProgressBar};
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Visitor};
 use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
@@ -440,18 +442,38 @@ impl Remote {
         Self { cache, s3 }
     }
 
-    async fn git_revision(&self, prefix: &str) -> anyhow::Result<Sha> {
-        let dot = prefix.rfind(".").ok_or_else(|| anyhow!("no dot"))?;
-        let short = &prefix[dot + 1..prefix.len() - 1];
-        let output = self.cache.git().args(["rev-parse", short]).output()?;
-        let string = if output.status.success() {
-            pop_newline(String::from_utf8(output.stdout)?)?
-        } else {
-            let key = format!("{prefix}git-revision");
-            let output = self.s3.get_object().bucket(BUCKET).key(key).send().await?;
-            String::from_utf8(output.body.collect().await?.to_vec())?
-        };
-        Ok(string.parse()?)
+    async fn git_revisions(
+        &self,
+        mut prefixes: VecDeque<String>,
+        mut callback: impl FnMut(Sha, String),
+    ) -> anyhow::Result<()> {
+        while !prefixes.is_empty() {
+            let mut cmd = self.cache.git();
+            cmd.arg("rev-parse");
+            // We cap the number of commits we try to ask Git for at once, because otherwise the
+            // retries could potentially cause this function to become quadratic instead of linear.
+            for prefix in prefixes.iter().take(100) {
+                let dot = prefix.rfind(".").ok_or_else(|| anyhow!("no dot"))?;
+                let short = &prefix[dot + 1..prefix.len() - 1];
+                cmd.arg(short);
+            }
+            let output = cmd.output()?;
+            for line in String::from_utf8(output.stdout)?.lines() {
+                let Some(prefix) = prefixes.pop_front() else {
+                    bail!("unexpected extra Git output");
+                };
+                let sha = match line.parse() {
+                    Ok(sha) => sha,
+                    Err(_) => {
+                        let key = format!("{prefix}git-revision");
+                        let output = self.s3.get_object().bucket(BUCKET).key(key).send().await?;
+                        String::from_utf8(output.body.collect().await?.to_vec())?.parse()?
+                    }
+                };
+                callback(sha, prefix);
+            }
+        }
+        Ok(())
     }
 
     async fn list_revisions(
@@ -472,11 +494,13 @@ impl Remote {
                     .set_continuation_token(continuation_token)
                     .send()
                     .await?;
-                for item in output.common_prefixes.unwrap_or_default() {
-                    let prefix = item.prefix.ok_or_else(|| anyhow!("missing prefix"))?;
-                    let sha = self.git_revision(&prefix).await?;
-                    callback(sha, prefix);
-                }
+                let prefixes = output
+                    .common_prefixes
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|item| item.prefix.ok_or_else(|| anyhow!("missing prefix")))
+                    .collect::<anyhow::Result<VecDeque<String>>>()?;
+                self.git_revisions(prefixes, &mut callback).await?;
                 match output.next_continuation_token {
                     Some(token) => continuation_token = Some(token),
                     None => break,
@@ -488,10 +512,10 @@ impl Remote {
 
     async fn channel_json(
         &self,
+        spinner: ProgressBar,
         channel: Branch,
         releases: impl IntoIterator<Item = &str>,
     ) -> anyhow::Result<String> {
-        let spinner = ProgressBar::new_spinner();
         spinner.set_message(<&str>::from(channel));
         spinner.enable_steady_tick(Duration::from_millis(100));
         let mut pairs = IndexMap::new();
@@ -503,6 +527,26 @@ impl Remote {
         let json = push_newline(serde_json::to_string_pretty(&pairs)?);
         spinner.finish();
         Ok(json)
+    }
+
+    async fn fetch_channels<I: IntoIterator<Item = &'static str>>(
+        &self,
+        releases: impl Fn(Branch) -> I,
+        callback: impl Copy + Fn(Branch, String) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let multi = MultiProgress::new();
+        try_join_all(Branch::iter().filter_map(|branch| {
+            let mut iterator = releases(branch).into_iter().peekable();
+            iterator.peek()?; // Ignore this branch if there's nothing to fetch for it.
+            let spinner = multi.add(ProgressBar::new_spinner());
+            Some(async move {
+                let json = self.channel_json(spinner, branch, iterator).await?;
+                callback(branch, json)?;
+                Ok::<_, anyhow::Error>(())
+            })
+        }))
+        .await?;
+        Ok(())
     }
 }
 
@@ -922,12 +966,12 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let remote = Remote::new(cache).await;
-            for branch in Branch::iter() {
-                if let Some(release) = branch.current_release() {
-                    let json = remote.channel_json(branch, [release]).await?;
-                    fs::write(remote.cache.path(branch.key()), json)?;
-                }
-            }
+            remote
+                .fetch_channels(
+                    |branch| branch.current_release(),
+                    |branch, json| Ok(fs::write(remote.cache.path(branch.key()), json)?),
+                )
+                .await?;
 
             // We fetch from Git after fetching from S3 so that, once we're done, all the commit
             // hashes we got from S3 should also be in our local Git clone.
@@ -1105,15 +1149,12 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "history")]
         (Ok(cache), Commands::History { dir }) => {
             let remote = Remote::new(cache).await;
-            for branch in Branch::iter() {
-                let releases = branch.past_releases();
-                if !releases.is_empty() {
-                    let json = remote
-                        .channel_json(branch, releases.iter().copied())
-                        .await?;
-                    fs::write(dir.join(branch.key().name()), json)?;
-                }
-            }
+            remote
+                .fetch_channels(
+                    |branch| branch.past_releases().iter().copied(),
+                    |branch, json| Ok(fs::write(dir.join(branch.key().name()), json)?),
+                )
+                .await?;
             Ok(())
         }
     }

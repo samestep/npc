@@ -11,6 +11,7 @@ aws-sdk-s3 = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+futures = "0.3"
 indexmap = { version = "2", features = ["serde"] }
 indicatif = "0.18"
 percent-encoding = "2"

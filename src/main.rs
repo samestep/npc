@@ -56,6 +56,17 @@ fn now() -> String {
         .to_string()
 }
 
+fn git() -> Command {
+    let mut cmd = Command::new(GIT);
+    // Disable Git config: https://git-scm.com/docs/git/2.47.0#Documentation/git.txt-GITCONFIGGLOBAL
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null");
+    // For example, without this, the `git remote` check in `Cache::new` would fail if someone uses
+    // `pushInsteadOf` to push with SSH instead of HTTPS for GitHub:
+    // https://git-scm.com/docs/git-config/2.47.0#Documentation/git-config.txt-urlbasepushInsteadOf
+    cmd
+}
+
 #[derive(Error, Debug)]
 #[error("invalid Git SHA")]
 struct ParseShaError;
@@ -265,7 +276,7 @@ impl Cache {
 
         let git_dir = dir.join(CacheKey::Git.name());
         if fs::exists(&git_dir)? {
-            let output = Command::new(GIT)
+            let output = git()
                 .arg("-C")
                 .arg(&git_dir)
                 .args(["remote", "--verbose"])
@@ -305,7 +316,7 @@ impl Cache {
     }
 
     fn git(&self) -> Command {
-        let mut cmd = Command::new(GIT);
+        let mut cmd = git();
         // Because we did a blobless clone, some commands that wouldn't normally need network access
         // might try to lazily fetch objects. We consider it a bug for subcommands other than
         // `fetch` to access the network (modulo `nix flake update` as used by the `checkout` and
@@ -898,7 +909,7 @@ async fn main() -> anyhow::Result<()> {
                     if missing_git {
                         let repo = "https://github.com/NixOS/nixpkgs.git";
                         // We shouldn't need any trees or blobs, only history information.
-                        let status = Command::new(GIT)
+                        let status = git()
                             .args(["clone", "--mirror", "--filter=tree:0", repo])
                             .arg(cache.path(CacheKey::Git))
                             .status()?;

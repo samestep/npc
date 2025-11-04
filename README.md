@@ -63,7 +63,7 @@ If you use [Home Manager](https://github.com/nix-community/home-manager) and wou
     username = "username";
     homeDirectory = "/home/username";
     packages = [
-      npc.packages.${pkgs.system}.default
+      npc.packages.${pkgs.stdenv.hostPlatform.system}.default
     ];
   };
 }

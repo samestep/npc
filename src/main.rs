@@ -649,7 +649,7 @@ struct FlakeInput {
     rev: Sha,
 }
 
-fn filter_node(node: FlakeNode) -> Option<(Branch, Sha)> {
+fn filter_node(node: &FlakeNode) -> Option<(Branch, Sha)> {
     if let (
         Some(FlakeOriginal::GitHub {
             owner: owner_original,
@@ -661,14 +661,14 @@ fn filter_node(node: FlakeNode) -> Option<(Branch, Sha)> {
             repo: repo_locked,
             rev,
         }),
-    ) = (node.original, node.locked)
+    ) = (&node.original, &node.locked)
         && let Ok(branch) = branch.as_deref().unwrap_or("master").parse()
         && owner_original == "NixOS"
         && repo_original == "nixpkgs"
         && owner_locked == "NixOS"
         && repo_locked == "nixpkgs"
     {
-        Some((branch, rev))
+        Some((branch, *rev))
     } else {
         None
     }
@@ -683,31 +683,52 @@ fn resolve(
         (_, Some(_), None) => bail!("specified `--input` but no `flake.lock`"),
         (None, None, None) => bail!("no branch specified and no `flake.lock` found"),
         (Some(branch), None, _) => Ok((branch, None)),
-        (None, Some(name), Some(mut flake_lock)) => {
+        (None, Some(name), Some(flake_lock)) => {
             let parts: Vec<_> = name.split('/').collect();
             let key = flake_lock.resolve(&parts)?;
-            let Some(index) = flake_lock.nodes.get_index_of(key) else {
+            let Some(node) = flake_lock.nodes.get(key) else {
                 bail!("no node named {key} in `flake.lock`");
             };
-            // We use an index instead of direct `swap_remove` due to borrowing issues.
-            let (_, node) = flake_lock.nodes.swap_remove_index(index).unwrap();
             let Some((bran, rev)) = filter_node(node) else {
                 bail!("expected Nixpkgs in flake input named {name}");
             };
             Ok((bran, Some(FlakeInput { name, rev })))
         }
         (None, None, Some(flake_lock)) => {
-            let mut choices: Vec<_> = flake_lock
-                .nodes
-                .into_iter()
-                .filter_map(|(name, node)| Some((name, filter_node(node)?)))
-                .collect();
-            let (name, (branch, rev)) = choices
-                .pop()
-                .ok_or_else(|| anyhow!("no Nixpkgs input found in `flake.lock`"))?;
-            if !choices.is_empty() {
+            let mut paths = Vec::new();
+            let mut stack = vec![(None, &flake_lock.root)];
+            while let Some((path, key)) = stack.pop() {
+                let index = paths.len();
+                paths.push((path, key));
+                if let Some(FlakeNode {
+                    inputs: Some(inputs),
+                    ..
+                }) = flake_lock.nodes.get(key)
+                {
+                    for (input, subpath) in inputs {
+                        if let FlakePath::Direct(subkey) = subpath {
+                            stack.push((Some((index, input)), subkey));
+                        }
+                    }
+                }
+            }
+            let mut it = paths.iter().enumerate().filter_map(|(index, (_, key))| {
+                let (branch, rev) = filter_node(flake_lock.nodes.get(*key)?)?;
+                Some((index, branch, rev))
+            });
+            let Some((mut index, branch, rev)) = it.next() else {
+                bail!("no Nixpkgs input found in `flake.lock`");
+            };
+            if it.next().is_some() {
                 bail!("multiple Nixpkgs inputs in `flake.lock`; please specify `--input`");
             }
+            let mut parts = Vec::<&str>::new();
+            while let (Some((parent, part)), _) = paths[index] {
+                parts.push(part);
+                index = parent;
+            }
+            parts.reverse();
+            let name = parts.join("/");
             Ok((branch, Some(FlakeInput { name, rev })))
         }
     }

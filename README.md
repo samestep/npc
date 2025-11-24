@@ -53,26 +53,7 @@ This starts a shell within your shell which has `npc` available on the `PATH`.
 
 ### Home Manager
 
-If you use [Home Manager](https://github.com/nix-community/home-manager) and would like to do a more global installation, you can add `npc` to your `home.nix` like this:
-
-```nix
-{ pkgs, npc, ... }:
-{
-  home = {
-    stateVersion = "25.05";
-    username = "username";
-    homeDirectory = "/home/username";
-    packages = [
-      npc.packages.${pkgs.stdenv.hostPlatform.system}.default
-    ];
-  };
-}
-```
-
-This is assuming you configure Home Manager via a flake, in which case you'd pass `npc` to `home.nix` via `extraSpecialArgs`:
-
-<details>
-<summary><code>flake.nix</code></summary>
+If you use [Home Manager](https://github.com/nix-community/home-manager) and would like to do a more global installation, the easiest way is via the overlay provided by this flake; for instance, your `flake.nix` might look like this:
 
 ```nix
 {
@@ -83,10 +64,7 @@ This is assuming you configure Home Manager via a flake, in which case you'd pas
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    npc = {
-      url = "github:samestep/npc";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    npc.url = "github:samestep/npc";
   };
   outputs =
     {
@@ -99,16 +77,32 @@ This is assuming you configure Home Manager via a flake, in which case you'd pas
     flake-utils.lib.eachDefaultSystem (system: {
       homeConfigurations = {
         "username" = home-manager.lib.homeManagerConfiguration {
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ npc.overlays.default ];
+          };
           modules = [ ./home.nix ];
-          extraSpecialArgs = { inherit npc; };
         };
       };
     });
 }
 ```
 
-</details>
+Then you can add `npc` to your `home.nix` like this:
+
+```nix
+{ pkgs, ... }:
+{
+  home = {
+    stateVersion = "25.05";
+    username = "username";
+    homeDirectory = "/home/username";
+    packages = [
+      pkgs.npc
+    ];
+  };
+}
+```
 
 ## Usage
 

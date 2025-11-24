@@ -7,10 +7,10 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # This is the last `nixpkgs-unstable` commit with a Git version earlier than
-    # v2.48.0, which introduced a bug that sometimes causes `git fetch` to fail
-    # on partial clones like the one `npc` uses.
-    nixpkgs-git-2-47-2.url = "github:NixOS/nixpkgs/dad564433178067be1fbdfcce23b546254b6d641";
+    # This is the last stable release with a Git version earlier than v2.48.0,
+    # which introduced a bug that sometimes causes `git fetch` to fail on
+    # partial clones like the one `npc` uses.
+    nixpkgs-git.url = "github:NixOS/nixpkgs/nixos-24.11";
   };
   outputs =
     {
@@ -19,36 +19,53 @@
       flake-utils,
       crane,
       rust-overlay,
-      nixpkgs-git-2-47-2,
+      nixpkgs-git,
     }:
-    flake-utils.lib.eachDefaultSystem (
+    let
+      env = pkgs: {
+        GIT_BIN = "${(import nixpkgs-git { system = pkgs.stdenv.hostPlatform.system; }).git}/bin/git";
+        NIX_BIN = "${pkgs.nix}/bin/nix";
+      };
+      overlay =
+        final: prev:
+        let
+          craneLib = crane.mkLib final;
+          commonArgs = {
+            src = ./.;
+            strictDeps = true;
+          };
+        in
+        {
+          npc = craneLib.buildPackage (
+            commonArgs
+            // {
+              cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+              inherit (env final) GIT_BIN NIX_BIN;
+            }
+          );
+        };
+    in
+    {
+      overlays.default = overlay;
+    }
+    // flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ (import rust-overlay) ];
+          overlays = [
+            (import rust-overlay)
+            overlay
+          ];
         };
-        craneLib = crane.mkLib pkgs;
-        commonArgs = {
-          src = ./.;
-          strictDeps = true;
-        };
-        GIT_BIN = "${(import nixpkgs-git-2-47-2 { inherit system; }).git}/bin/git";
-        NIX_BIN = "${pkgs.nix}/bin/nix";
       in
       {
-        packages.default = craneLib.buildPackage (
-          commonArgs
-          // {
-            cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-            inherit GIT_BIN NIX_BIN;
-          }
-        );
+        packages.default = pkgs.npc;
         devShells.default = pkgs.mkShell {
           buildInputs = [
             pkgs.rust-bin.stable.latest.default
           ];
-          inherit GIT_BIN NIX_BIN;
+          inherit (env pkgs) GIT_BIN NIX_BIN;
         };
       }
     );

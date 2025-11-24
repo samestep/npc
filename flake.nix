@@ -46,7 +46,6 @@
         );
         devShells.default = pkgs.mkShell {
           buildInputs = [
-            pkgs.nixfmt
             pkgs.rust-bin.stable.latest.default
           ];
           inherit GIT_BIN NIX_BIN;

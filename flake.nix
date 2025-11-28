@@ -31,7 +31,7 @@
         let
           craneLib = crane.mkLib final;
           commonArgs = {
-            src = ./.;
+            src = craneLib.cleanCargoSource ./.;
             strictDeps = true;
           };
         in

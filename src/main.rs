@@ -1,11 +1,14 @@
 use std::{
     collections::VecDeque,
-    env, fmt, fs,
-    io::{self, BufRead, Write},
+    env,
+    fmt::{self, Write as _},
+    fs,
+    io::{self, BufRead, Write as _},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -15,10 +18,10 @@ use aws_sdk_s3 as s3;
 use clap::{Parser, Subcommand};
 use futures::future::try_join_all;
 use indexmap::IndexMap;
-use indicatif::{MultiProgress, ProgressBar};
+use indicatif::ProgressBar;
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
+use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Visitor};
-use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 use thiserror::Error;
 
 /// The name of this program.
@@ -69,21 +72,22 @@ fn git() -> Command {
     cmd
 }
 
-#[derive(Error, Debug)]
-#[error("invalid Git SHA")]
-struct ParseShaError;
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Sha([u8; 20]);
 
 impl fmt::Display for Sha {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut s = String::new();
         for byte in self.0 {
-            write!(f, "{:02x}", byte)?;
+            write!(&mut s, "{:02x}", byte)?;
         }
-        Ok(())
+        f.pad(&s)
     }
 }
+
+#[derive(Error, Debug)]
+#[error("invalid Git SHA")]
+struct ParseShaError;
 
 impl FromStr for Sha {
     type Err = ParseShaError;
@@ -97,7 +101,7 @@ impl FromStr for Sha {
             let substr = str::from_utf8(chunk).map_err(|_| ParseShaError)?;
             array[i] = u8::from_str_radix(substr, 16).map_err(|_| ParseShaError)?;
         }
-        Ok(Sha(array))
+        Ok(Self(array))
     }
 }
 
@@ -119,7 +123,7 @@ impl<'de> Visitor<'de> for ShaVisitor {
     type Value = Sha;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a Git SHA")
+        formatter.pad("a Git SHA")
     }
 
     fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
@@ -127,95 +131,171 @@ impl<'de> Visitor<'de> for ShaVisitor {
     }
 }
 
-#[derive(
-    Clone, Copy, Deserialize, EnumIter, EnumString, Eq, IntoStaticStr, PartialEq, Serialize,
-)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Release {
+    year: u8,
+    month: u8,
+}
+
+impl fmt::Display for Release {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.pad(&format!("{:02}.{:02}", self.year, self.month))
+    }
+}
+
+#[derive(Error, Debug)]
+#[error("invalid NixOS release")]
+struct ParseReleaseError;
+
+impl FromStr for Release {
+    type Err = ParseReleaseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let re = Regex::new(r"^(\d\d)\.(\d\d)$").unwrap();
+        let caps = re.captures(s).ok_or(ParseReleaseError)?;
+        let year = caps[1].parse().unwrap();
+        let month = caps[2].parse().unwrap();
+        Ok(Release { year, month })
+    }
+}
+
+#[derive(Clone, Copy)]
 enum Branch {
-    #[serde(rename = "master")]
-    #[strum(serialize = "master")]
     Master,
-
-    #[serde(rename = "nixpkgs-unstable")]
-    #[strum(serialize = "nixpkgs-unstable")]
     NixpkgsUnstable,
-
-    #[serde(rename = "nixos-unstable-small")]
-    #[strum(serialize = "nixos-unstable-small")]
     NixosUnstableSmall,
-
-    #[serde(rename = "nixos-unstable")]
-    #[strum(serialize = "nixos-unstable")]
     NixosUnstable,
-
-    #[serde(rename = "nixpkgs-25.05-darwin")]
-    #[strum(serialize = "nixpkgs-25.05-darwin")]
-    Nixpkgs2505Darwin,
-
-    #[serde(rename = "nixos-25.05-small")]
-    #[strum(serialize = "nixos-25.05-small")]
-    Nixos2505Small,
-
-    #[serde(rename = "nixos-25.05")]
-    #[strum(serialize = "nixos-25.05")]
-    Nixos2505,
+    NixpkgsStableDarwin(Release),
+    NixosStableSmall(Release),
+    NixosStable(Release),
 }
 
 impl fmt::Display for Branch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad(self.into())
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Branch::Master => f.pad("master"),
+            Branch::NixpkgsUnstable => f.pad("nixpkgs-unstable"),
+            Branch::NixosUnstableSmall => f.pad("nixos-unstable-small"),
+            Branch::NixosUnstable => f.pad("nixos-unstable"),
+            Branch::NixpkgsStableDarwin(release) => f.pad(&format!("nixpkgs-{release}-darwin")),
+            Branch::NixosStableSmall(release) => f.pad(&format!("nixos-{release}-small")),
+            Branch::NixosStable(release) => f.pad(&format!("nixos-{release}")),
+        }
+    }
+}
+
+#[derive(Error, Debug)]
+#[error("invalid Nixpkgs branch")]
+struct ParseBranchError;
+
+fn stable_branch(re: &str, haystack: &str) -> Option<Result<Release, ParseBranchError>> {
+    Regex::new(re)
+        .unwrap()
+        .captures(haystack)
+        .map(|caps| caps[1].parse().map_err(|_| ParseBranchError))
+}
+
+impl FromStr for Branch {
+    type Err = ParseBranchError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "master" {
+            Ok(Branch::Master)
+        } else if s == "nixpkgs-unstable" {
+            Ok(Branch::NixpkgsUnstable)
+        } else if s == "nixos-unstable-small" {
+            Ok(Branch::NixosUnstableSmall)
+        } else if s == "nixos-unstable" {
+            Ok(Branch::NixosUnstable)
+        } else if let Some(release) = stable_branch(r"^nixpkgs-(.*)-darwin$", s) {
+            Ok(Branch::NixpkgsStableDarwin(release?))
+        } else if let Some(release) = stable_branch(r"^nixos-(.*)-small$", s) {
+            Ok(Branch::NixosStableSmall(release?))
+        } else if let Some(release) = stable_branch(r"^nixos-(.*)$", s) {
+            Ok(Branch::NixosStable(release?))
+        } else {
+            Err(ParseBranchError)
+        }
+    }
+}
+
+impl Serialize for Branch {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Branch {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_str(BranchVisitor)
+    }
+}
+
+struct BranchVisitor;
+
+impl<'de> Visitor<'de> for BranchVisitor {
+    type Value = Branch;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.pad("a Nixpkgs branch")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        v.parse().map_err(E::custom)
     }
 }
 
 impl Branch {
-    fn history(self) -> &'static str {
-        match self {
-            Self::Master => panic!("master branch has no precompiled history"),
-            Self::NixpkgsUnstable => include_str!("nixpkgs-unstable.json"),
-            Self::NixosUnstableSmall => include_str!("nixos-unstable-small.json"),
-            Self::NixosUnstable => include_str!("nixos-unstable.json"),
-            // No precompiled history for the stable branches, but the cache treats them the same as
-            // unstable branches, so we let them call this method and just return empty JSON.
-            Self::Nixpkgs2505Darwin | Self::Nixos2505Small | Self::Nixos2505 => "{}",
+    fn iter(releases: &[Release]) -> impl Iterator<Item = Self> {
+        let mut branches = vec![
+            Branch::Master,
+            Branch::NixpkgsUnstable,
+            Branch::NixosUnstableSmall,
+            Branch::NixosUnstable,
+        ];
+        for &release in releases.iter().rev() {
+            branches.extend_from_slice(&[
+                Branch::NixpkgsStableDarwin(release),
+                Branch::NixosStableSmall(release),
+                Branch::NixosStable(release),
+            ]);
         }
+        branches.into_iter()
     }
 
-    #[cfg(feature = "history")]
-    fn past_releases(self) -> &'static [&'static str] {
+    fn releases(self, releases: &[Release]) -> &[Release] {
         match self {
             Self::Master => &[],
-            // We exclude earlier releases since the bucket has no `git-revision` objects for them.
-            Self::NixpkgsUnstable | Self::NixosUnstableSmall | Self::NixosUnstable => &[
-                "16.09", "17.03", "17.09", "18.03", "18.09", "19.03", "19.09", "20.03", "20.09",
-                "21.03", "21.05", "21.11", "22.05", "22.11", "23.05", "23.11", "24.05", "24.11",
-                "25.05",
-            ],
-            Self::Nixpkgs2505Darwin | Self::Nixos2505Small | Self::Nixos2505 => &[],
+            Self::NixpkgsUnstable | Self::NixosUnstableSmall | Self::NixosUnstable => releases,
+            Self::NixpkgsStableDarwin(release)
+            | Self::NixosStableSmall(release)
+            | Self::NixosStable(release) => {
+                let Some(i) = releases.iter().position(|&item| item == release) else {
+                    return &[];
+                };
+                &releases[i..i + 1]
+            }
         }
     }
 
-    fn current_release(self) -> Option<&'static str> {
-        match self {
-            Self::Master => None,
-            Self::NixpkgsUnstable | Self::NixosUnstableSmall | Self::NixosUnstable => Some("25.11"),
-            Self::Nixpkgs2505Darwin | Self::Nixos2505Small | Self::Nixos2505 => Some("25.05"),
-        }
-    }
-
-    fn prefix(self, release: &str) -> String {
+    fn prefix(self, release: Release) -> String {
         match self {
             Self::Master => panic!("master branch is not tracked in S3"),
             Self::NixpkgsUnstable => format!("nixpkgs/nixpkgs-{release}pre"),
             Self::NixosUnstableSmall => format!("nixos/unstable-small/nixos-{release}pre"),
             Self::NixosUnstable => format!("nixos/unstable/nixos-{release}pre"),
-            Self::Nixpkgs2505Darwin => {
-                format!("nixpkgs/{release}-darwin/nixpkgs-darwin-{release}pre")
+            Self::NixpkgsStableDarwin(actual) => {
+                assert_eq!(release, actual);
+                format!("nixpkgs/{release}-darwin/")
             }
-            // For the stable and stable-small channels, the prefix needs to go all the way to that
-            // dot after the second instance of the version number, because otherwise we get beta
-            // versions listed at the very end, and since we don't do any sorting, those get
-            // incorrectly treated as the latest versions of the channel.
-            Self::Nixos2505Small => format!("nixos/{release}-small/nixos-{release}."),
-            Self::Nixos2505 => format!("nixos/{release}/nixos-{release}."),
+            Self::NixosStableSmall(actual) => {
+                assert_eq!(release, actual);
+                format!("nixos/{release}-small/")
+            }
+            Self::NixosStable(actual) => {
+                assert_eq!(release, actual);
+                format!("nixos/{release}/")
+            }
         }
     }
 
@@ -226,6 +306,7 @@ impl Branch {
 
 enum CacheKey<'a> {
     LastFetched,
+    Releases,
     Git,
     Branch(Branch),
     Bisect(&'a Path),
@@ -235,6 +316,7 @@ impl CacheKey<'_> {
     fn name(self) -> String {
         match self {
             Self::LastFetched => "last-fetched.txt".to_owned(),
+            Self::Releases => "releases.txt".to_owned(),
             Self::Git => "nixpkgs.git".to_owned(),
             Self::Branch(Branch::Master) => "master.dat".to_owned(),
             Self::Branch(channel) => format!("{channel}.json"),
@@ -258,6 +340,7 @@ struct PartialCache {
 struct Cache {
     dir: PathBuf,
     last_fetched: String,
+    releases: Vec<Release>,
 }
 
 impl Cache {
@@ -273,6 +356,22 @@ impl Cache {
             },
         };
         if last_fetched.is_none() {
+            missing_other = true;
+        }
+
+        let releases = match fs::read_to_string(dir.join(CacheKey::Releases.name())) {
+            Ok(contents) => Some(
+                contents
+                    .lines()
+                    .map(|line| Ok(line.to_owned().parse()?))
+                    .collect::<anyhow::Result<Vec<Release>>>()?,
+            ),
+            Err(err) => match err.kind() {
+                io::ErrorKind::NotFound => None,
+                _ => bail!(err),
+            },
+        };
+        if releases.is_none() {
             missing_other = true;
         }
 
@@ -294,7 +393,7 @@ impl Cache {
             missing_git = true;
         }
 
-        for branch in Branch::iter() {
+        for branch in Branch::iter(releases.as_deref().unwrap_or_default()) {
             let key = branch.key();
             if !fs::exists(dir.join(key.name()))? {
                 missing_other = true;
@@ -309,6 +408,7 @@ impl Cache {
             Ok(Ok(Self {
                 dir,
                 last_fetched: last_fetched.unwrap(),
+                releases: releases.unwrap(),
             }))
         }
     }
@@ -353,10 +453,8 @@ impl Cache {
             }
             channel => {
                 let history: IndexMap<Sha, String> =
-                    serde_json::from_str(channel.history()).unwrap();
-                let current: IndexMap<Sha, String> =
                     serde_json::from_str(&fs::read_to_string(self.path(channel.key()))?)?;
-                Ok(history.into_keys().chain(current.into_keys()).collect())
+                Ok(history.into_keys().collect())
             }
         }
     }
@@ -425,6 +523,63 @@ impl Cache {
     }
 }
 
+/// Query the nix-channels bucket to determine the next release.
+async fn prerelease() -> anyhow::Result<Release> {
+    let config = aws_config::defaults(BehaviorVersion::latest())
+        .no_credentials()
+        .region("us-east-1")
+        .load()
+        .await;
+    let s3 = s3::Client::new(&config);
+    let unstable = [
+        Branch::NixpkgsUnstable,
+        Branch::NixosUnstableSmall,
+        Branch::NixosUnstable,
+    ];
+    let outputs = try_join_all(unstable.map(|channel| {
+        s3.get_object()
+            .bucket("nix-channels")
+            .key(channel.to_string())
+            .send()
+    }))
+    .await?;
+    let mut release = None;
+    let re = Regex::new(r"(\d\d\.\d\d)pre\d+\.\w+$").unwrap();
+    for (output, channel) in outputs.into_iter().zip(unstable) {
+        let Some(url) = output.website_redirect_location else {
+            bail!("no redirect URL found for {channel}");
+        };
+        let Some(caps) = re.captures(&url) else {
+            bail!("failed to find prerelease version in {url}");
+        };
+        let rel = caps[1].parse().unwrap();
+        if let Some(other) = release
+            && rel != other
+        {
+            bail!("can't decide between prerelease versions {other} and {rel}");
+        }
+        release = Some(rel);
+    }
+    Ok(release.unwrap())
+}
+
+struct PrefixId {
+    re: Regex,
+}
+
+impl PrefixId {
+    fn new() -> Self {
+        let re = Regex::new(r"(\d+)\.\w+/$").unwrap();
+        Self { re }
+    }
+
+    fn get(&self, prefix: &str) -> Option<u128> {
+        let caps = self.re.captures(prefix)?;
+        let id = caps[1].parse().ok()?;
+        Some(id)
+    }
+}
+
 struct Remote {
     cache: Cache,
     s3: s3::Client,
@@ -440,6 +595,45 @@ impl Remote {
             .await;
         let s3 = s3::Client::new(&config);
         Self { cache, s3 }
+    }
+
+    async fn releases(&self) -> anyhow::Result<Vec<Release>> {
+        let mut releases = Vec::new();
+        let re = Regex::new(r"^nixos/(\d\d\.\d\d)/$").unwrap();
+        let mut continuation_token = None;
+        loop {
+            let output = self
+                .s3
+                .list_objects_v2()
+                .bucket(BUCKET)
+                .prefix("nixos/")
+                .delimiter("/")
+                .set_continuation_token(continuation_token)
+                .send()
+                .await?;
+            let prefixes = output
+                .common_prefixes
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| item.prefix.ok_or_else(|| anyhow!("missing prefix")))
+                .collect::<anyhow::Result<Vec<String>>>()?;
+            for prefix in prefixes {
+                if let Some(caps) = re.captures(&prefix) {
+                    let release: Release = caps[1].parse().unwrap();
+                    // We omit earlier releases: the bucket has no `git-revision` objects for them.
+                    let oldest = Release { year: 16, month: 9 };
+                    if release.year > 16 || release == oldest {
+                        releases.push(release);
+                    }
+                }
+            }
+            match output.next_continuation_token {
+                Some(token) => continuation_token = Some(token),
+                None => break,
+            };
+        }
+        releases.push(prerelease().await?);
+        Ok(releases)
     }
 
     async fn git_revisions(
@@ -479,7 +673,7 @@ impl Remote {
     async fn list_revisions(
         &self,
         channel: Branch,
-        releases: impl IntoIterator<Item = &str>,
+        releases: impl IntoIterator<Item = Release>,
         mut callback: impl FnMut(Sha, String),
     ) -> anyhow::Result<()> {
         for release in releases {
@@ -512,40 +706,58 @@ impl Remote {
 
     async fn channel_json(
         &self,
-        spinner: ProgressBar,
         channel: Branch,
-        releases: impl IntoIterator<Item = &str>,
+        releases: impl IntoIterator<Item = Release>,
+        inc: impl Fn(),
     ) -> anyhow::Result<String> {
-        spinner.set_message(<&str>::from(channel));
-        spinner.enable_steady_tick(Duration::from_millis(100));
         let mut pairs = IndexMap::new();
         self.list_revisions(channel, releases, |sha, prefix| {
             pairs.insert(sha, prefix);
-            spinner.set_message(format!("{channel}: {} commits", pairs.len()));
+            inc();
         })
         .await?;
+        // S3 lists things in lexicographical order, which doesn't necessarily match up with the
+        // chronological order we want. First, the beta versions of stable channels get listed last,
+        // even though they actually come first chronologically. Second, the integer ID that comes
+        // before the commit hash prefix can have an arbitrary number of digits, which causes the
+        // ordering to be wrong when e.g. an ID has few digits but a high leading digit.
+        let key = PrefixId::new();
+        for prefix in pairs.values() {
+            if key.get(prefix).is_none() {
+                bail!("failed to find ID in prefix {prefix}");
+            }
+        }
+        pairs.sort_by_key(|_, prefix| key.get(prefix).unwrap());
         let json = push_newline(serde_json::to_string_pretty(&pairs)?);
-        spinner.finish();
         Ok(json)
     }
 
-    async fn fetch_channels<I: IntoIterator<Item = &'static str>>(
+    async fn fetch_channels<I: IntoIterator<Item = Release>>(
         &self,
         releases: impl Fn(Branch) -> I,
         callback: impl Copy + Fn(Branch, String) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        let multi = MultiProgress::new();
-        try_join_all(Branch::iter().filter_map(|branch| {
+        let count = AtomicU64::new(0);
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_message("fetching channels...");
+        spinner.enable_steady_tick(Duration::from_millis(100));
+        try_join_all(Branch::iter(&self.cache.releases).filter_map(|branch| {
             let mut iterator = releases(branch).into_iter().peekable();
             iterator.peek()?; // Ignore this branch if there's nothing to fetch for it.
-            let spinner = multi.add(ProgressBar::new_spinner());
+            let (count, spinner) = (&count, &spinner);
             Some(async move {
-                let json = self.channel_json(spinner, branch, iterator).await?;
+                let json = self
+                    .channel_json(branch, iterator, || {
+                        let n = count.fetch_add(1, Ordering::Relaxed);
+                        spinner.set_message(format!("fetching channels... {n} commits"));
+                    })
+                    .await?;
                 callback(branch, json)?;
                 Ok::<_, anyhow::Error>(())
             })
         }))
         .await?;
+        spinner.finish();
         Ok(())
     }
 }
@@ -905,13 +1117,6 @@ enum Commands {
         #[command(subcommand)]
         bisect: Bisect,
     },
-
-    #[cfg(feature = "history")]
-    /// Generate JSON files for unstable channel commits before the most recent release
-    History {
-        /// Directory in which to generate files
-        dir: PathBuf,
-    },
 }
 
 #[derive(Subcommand)]
@@ -970,7 +1175,11 @@ async fn main() -> anyhow::Result<()> {
                     cache
                 }
                 Err(PartialCache { dir, missing_git }) => {
-                    let cache = Cache { dir, last_fetched };
+                    let cache = Cache {
+                        dir,
+                        last_fetched,
+                        releases: Vec::new(),
+                    };
                     if missing_git {
                         let repo = "https://github.com/NixOS/nixpkgs.git";
                         // We shouldn't need any trees or blobs, only history information.
@@ -986,10 +1195,21 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            let remote = Remote::new(cache).await;
+            let mut remote = Remote::new(cache).await;
+
+            remote.cache.releases = {
+                let releases = remote.releases().await?;
+                let mut lines = String::new();
+                for release in &releases {
+                    writeln!(&mut lines, "{release}")?;
+                }
+                fs::write(remote.cache.path(CacheKey::Releases), lines)?;
+                releases
+            };
+
             remote
                 .fetch_channels(
-                    |branch| branch.current_release(),
+                    |branch| branch.releases(&remote.cache.releases).iter().copied(),
                     |branch, json| Ok(fs::write(remote.cache.path(branch.key()), json)?),
                 )
                 .await?;
@@ -1053,8 +1273,12 @@ async fn main() -> anyhow::Result<()> {
             println!("{message1} {}", now());
             println!("{message2} {}", cache.last_fetched);
             println!();
-            for branch in Branch::iter() {
-                assert!(<&str>::from(branch).len() <= width);
+            let releases = cache.releases.len();
+            // Don't try to print stable branches for the next release since those don't exist yet,
+            // and don't print stable branches older than the previous release since those are no
+            // longer being updated.
+            for branch in Branch::iter(&cache.releases[releases - 3..releases - 1]) {
+                assert!(branch.to_string().len() <= width);
                 match cache.branch(branch)?.last() {
                     None => println!("{branch}"),
                     Some(sha) => {
@@ -1165,18 +1389,6 @@ async fn main() -> anyhow::Result<()> {
                     _ => Err(anyhow!(err)),
                 }),
             }
-        }
-
-        #[cfg(feature = "history")]
-        (Ok(cache), Commands::History { dir }) => {
-            let remote = Remote::new(cache).await;
-            remote
-                .fetch_channels(
-                    |branch| branch.past_releases().iter().copied(),
-                    |branch, json| Ok(fs::write(dir.join(branch.key().name()), json)?),
-                )
-                .await?;
-            Ok(())
         }
     }
 }

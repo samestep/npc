@@ -134,20 +134,23 @@ Alternatively, if you've decided you don't want to use `npc` anymore and want to
 
 ### `npc status`
 
-This command tells you when each Nixpkgs branch was last updated, according to whenever you last ran `npc fetch`:
+For all Nixpkgs branches in the previous release or newer, this command tells you when the branch was last updated, according to whenever you last ran `npc fetch`:
 
 ```
 $ npc status
-current local time is 2025-10-15 09:33:11 -0400
-last fetched cache at 2025-10-15 09:32:28 -0400
+current local time is 2025-11-28 14:48:17 -0500
+last fetched cache at 2025-11-28 14:47:53 -0500
 
-master                2025-10-15 08:59:37 -0400
-nixpkgs-unstable      2025-10-14 08:01:24 -0400
-nixos-unstable-small  2025-10-14 18:01:03 -0400
-nixos-unstable        2025-10-12 12:01:26 -0400
-nixpkgs-25.05-darwin  2025-10-13 17:54:55 -0400
-nixos-25.05-small     2025-10-14 20:25:44 -0400
-nixos-25.05           2025-10-14 02:34:43 -0400
+master                2025-11-28 14:12:53 -0500
+nixpkgs-unstable      2025-11-27 02:58:14 -0500
+nixos-unstable-small  2025-11-27 19:11:30 -0500
+nixos-unstable        2025-11-27 06:14:36 -0500
+nixpkgs-25.11-darwin  2025-11-26 11:09:25 -0500
+nixos-25.11-small     2025-11-27 20:42:38 -0500
+nixos-25.11           2025-11-26 11:09:25 -0500
+nixpkgs-25.05-darwin  2025-11-27 09:19:47 -0500
+nixos-25.05-small     2025-11-28 12:35:20 -0500
+nixos-25.05           2025-11-23 20:37:40 -0500
 ```
 
 ### `npc log`
@@ -156,16 +159,16 @@ This command prints the history of a Nixpkgs branch:
 
 ```
 $ npc log nixpkgs-unstable -n10
-2ea123939c5cb71d2761896c27e475aeab266364 2025-10-14 08:01:24 -0400
-c12c63cd6c5eb34c7b4c3076c6a99e00fcab86ec 2025-10-13 05:56:54 -0400
-832e3b6db48508ae436c2c7bfc0cf914eac6938e 2025-10-12 04:13:11 -0400
-362791944032cb532aabbeed7887a441496d5e6e 2025-10-11 02:31:15 -0400
-870493f9a8cb0b074ae5b411b2f232015db19a65 2025-10-10 09:35:32 -0400
-2dad7af78a183b6c486702c18af8a9544f298377 2025-10-08 22:37:25 -0400
-fb5cf53218b987f2703a5bbc292a030c0fe33443 2025-10-08 06:03:27 -0400
-8b5c9dd8856f0c0cf46cc91f2c21c106a9d42e25 2025-10-07 21:30:28 -0400
-bce5fe2bb998488d8e7e7856315f90496723793c 2025-10-07 04:41:47 -0400
-d7f52a7a640bc54c7bb414cca603835bf8dd4b10 2025-10-04 22:43:53 -0400
+0d59e0290eefe0f12512043842d7096c4070f30e 2025-11-27 02:58:14 -0500
+5c46f3bd98147c8d82366df95bbef2cab3a967ea 2025-11-26 09:39:26 -0500
+bb813de6d2241bcb1b5af2d3059f560c66329967 2025-11-26 01:22:50 -0500
+dc205f7b4fdb04c8b7877b43edb7b73be7730081 2025-11-25 09:41:04 -0500
+ee09932cedcef15aaf476f9343d1dea2cb77e261 2025-11-23 16:50:36 -0500
+878e468e02bfabeda08c79250f7ad583037f2227 2025-11-22 05:07:53 -0500
+9fe0d00db1794fe493677b1abe9ca6d08965f4d1 2025-11-21 03:16:52 -0500
+a8d610af3f1a5fb71e23e08434d8d61a466fc942 2025-11-20 01:07:48 -0500
+6f374686605df381de8541c072038472a5ea2e2d 2025-11-18 06:19:29 -0500
+0ade817efdde79cbc46b624c849027335ebc25c5 2025-11-17 22:14:24 -0500
 ```
 
 If you don't pass `-n`/`--max-count` then there will be too many commits to fit on one screen, so the Git pager will be used to let you scroll through the list of commits, search for specific commits or dates, etc.

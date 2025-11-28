@@ -6,12 +6,9 @@ on:
       - main
 
 jobs:
-  build:
+  check:
     runs-on: ubuntu-24.04
-    env:
-      GIT_BIN: git
-      NIX_BIN: nix
     steps:
-      - uses: actions/checkout@v5
-      - run: cargo check
-      - run: cargo check --all-features
+      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@v6
+      - run: nix flake check --print-build-logs

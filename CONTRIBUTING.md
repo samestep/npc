@@ -14,10 +14,20 @@ Or you can just use [`cargo run`](https://doc.rust-lang.org/cargo/commands/cargo
 cargo run --release -- --help
 ```
 
-Also, I used [markdown-toc](https://github.com/jonschlinkert/markdown-toc) to generate the table of contents in [`README.md`](README.md); you can run it like this:
+There are a couple lints you can run along with building the tool itself:
 
 ```sh
-nix-shell -p nodejs --run "npx markdown-toc --bullets='-' -i README.md"
+nix flake check
 ```
 
-This situation isn't ideal; I'll see if I can get markdown-toc into Nixpkgs to make this easier.
+One lint uses [markdown-toc](https://github.com/jonschlinkert/markdown-toc) to generate the table of contents in `README.md`; you can run it like this:
+
+```sh
+markdown-toc --bullets="-" -i README.md
+```
+
+Another lint uses [svg-term](https://github.com/marionebl/svg-term-cli) to convert `example.cast` (generated via [asciinema](https://asciinema.org/)) to `example.svg`; you can run it like this:
+
+```sh
+svg-term --window --in example.cast --out example.svg
+```

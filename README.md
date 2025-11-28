@@ -58,7 +58,7 @@ If you use [Home Manager](https://github.com/nix-community/home-manager) and wou
 ```nix
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     flake-utils.url = "github:numtide/flake-utils";
     home-manager = {
       url = "github:nix-community/home-manager";
@@ -94,7 +94,7 @@ Then you can add `npc` to your `home.nix` like this:
 { pkgs, ... }:
 {
   home = {
-    stateVersion = "25.05";
+    stateVersion = "25.11";
     username = "username";
     homeDirectory = "/home/username";
     packages = [

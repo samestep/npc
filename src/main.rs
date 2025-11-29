@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     str::FromStr,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 
@@ -743,7 +743,7 @@ impl Remote {
         releases: impl Fn(Branch) -> I,
         callback: impl Copy + Fn(Branch, String) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-        let count = AtomicU64::new(0);
+        let count = AtomicUsize::new(1); // Start at 1 since `fetch_add` returns the previous value.
         let spinner = ProgressBar::new_spinner();
         spinner.set_message("fetching channels...");
         spinner.enable_steady_tick(Duration::from_millis(100));

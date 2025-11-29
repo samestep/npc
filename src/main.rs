@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::VecDeque,
     env,
     fmt::{self, Write as _},
@@ -673,33 +674,31 @@ impl Remote {
     async fn list_revisions(
         &self,
         channel: Branch,
-        releases: impl IntoIterator<Item = Release>,
+        release: Release,
         mut callback: impl FnMut(Sha, String),
     ) -> anyhow::Result<()> {
-        for release in releases {
-            let mut continuation_token = None;
-            loop {
-                let output = self
-                    .s3
-                    .list_objects_v2()
-                    .bucket(BUCKET)
-                    .prefix(channel.prefix(release))
-                    .delimiter("/")
-                    .set_continuation_token(continuation_token)
-                    .send()
-                    .await?;
-                let prefixes = output
-                    .common_prefixes
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|item| item.prefix.ok_or_else(|| anyhow!("missing prefix")))
-                    .collect::<anyhow::Result<VecDeque<String>>>()?;
-                self.git_revisions(prefixes, &mut callback).await?;
-                match output.next_continuation_token {
-                    Some(token) => continuation_token = Some(token),
-                    None => break,
-                };
-            }
+        let mut continuation_token = None;
+        loop {
+            let output = self
+                .s3
+                .list_objects_v2()
+                .bucket(BUCKET)
+                .prefix(channel.prefix(release))
+                .delimiter("/")
+                .set_continuation_token(continuation_token)
+                .send()
+                .await?;
+            let prefixes = output
+                .common_prefixes
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| item.prefix.ok_or_else(|| anyhow!("missing prefix")))
+                .collect::<anyhow::Result<VecDeque<String>>>()?;
+            self.git_revisions(prefixes, &mut callback).await?;
+            match output.next_continuation_token {
+                Some(token) => continuation_token = Some(token),
+                None => break,
+            };
         }
         Ok(())
     }
@@ -707,20 +706,27 @@ impl Remote {
     async fn channel_json(
         &self,
         channel: Branch,
-        releases: impl IntoIterator<Item = Release>,
+        releases: impl Iterator<Item = Release>,
         inc: impl Fn(),
     ) -> anyhow::Result<String> {
-        let mut pairs = IndexMap::new();
-        self.list_revisions(channel, releases, |sha, prefix| {
-            pairs.insert(sha, prefix);
-            inc();
-        })
+        let cell = Cell::new(IndexMap::new());
+        try_join_all(releases.map(|release| {
+            self.list_revisions(channel, release, |sha, prefix| {
+                let mut pairs = cell.take();
+                pairs.insert(sha, prefix);
+                let tmp = cell.replace(pairs);
+                assert!(tmp.is_empty());
+                inc();
+            })
+        }))
         .await?;
-        // S3 lists things in lexicographical order, which doesn't necessarily match up with the
-        // chronological order we want. First, the beta versions of stable channels get listed last,
-        // even though they actually come first chronologically. Second, the integer ID that comes
-        // before the commit hash prefix can have an arbitrary number of digits, which causes the
-        // ordering to be wrong when e.g. an ID has few digits but a high leading digit.
+        let mut pairs = cell.into_inner();
+        // We handled the list of releases concurrently, but even if we didn't, S3 lists things in
+        // lexicographical order, which doesn't necessarily match up with the chronological order we
+        // want. First, the beta versions of stable channels get listed last, even though they
+        // actually come first chronologically. Second, the integer ID that comes before the commit
+        // hash prefix can have an arbitrary number of digits, which causes the ordering to be wrong
+        // when e.g. an ID has few digits but a high leading digit.
         let key = PrefixId::new();
         for prefix in pairs.values() {
             if key.get(prefix).is_none() {

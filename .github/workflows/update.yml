@@ -17,7 +17,8 @@ jobs:
       - run: nix flake update 2> >(tee nix-flake-update.txt >&2)
       - run: cargo update 2> >(tee cargo-lock.txt >&2)
       - run: nix flake check --print-build-logs
-      - id: body
+      - name: Generate pull request body
+        id: body
         run: |
           {
             echo 'body<<EOF'
@@ -32,9 +33,6 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - uses: peter-evans/create-pull-request@v8
         with:
-          add-paths: |
-            flake.lock
-            Cargo.lock
           commit-message: Update `flake.lock` and `Cargo.lock`
           branch: update
           title: Update `flake.lock` and `Cargo.lock`

@@ -1,0 +1,41 @@
+name: Update
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@v6
+      - run: nix flake update 2> >(tee nix-flake-update.txt >&2)
+      - run: cargo update 2> >(tee cargo-lock.txt >&2)
+      - run: nix flake check --print-build-logs
+      - id: body
+        run: |
+          {
+            echo 'body<<EOF'
+            echo "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo '```'
+            cat nix-flake-update.txt
+            echo '```'
+            echo '```'
+            cat cargo-lock.txt
+            echo '```'
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+      - uses: peter-evans/create-pull-request@v8
+        with:
+          add-paths: |
+            flake.lock
+            Cargo.lock
+          commit-message: Update `flake.lock` and `Cargo.lock`
+          branch: update
+          title: Update `flake.lock` and `Cargo.lock`
+          body: ${{ steps.body.outputs.body }}

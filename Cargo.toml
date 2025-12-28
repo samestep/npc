@@ -20,7 +20,3 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-
-[features]
-# This feature is for generating the JSON files in `src`.
-history = []

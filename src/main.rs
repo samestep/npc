@@ -1078,6 +1078,7 @@ impl Bisection {
 
 /// Nixpkgs channel history CLI
 #[derive(Parser)]
+#[command(name = NAME, version = concat!("https://github.com/samestep/npc/tree/", env!("NPC_REV")))]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

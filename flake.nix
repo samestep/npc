@@ -25,6 +25,7 @@
       env = pkgs: {
         GIT_BIN = "${(import nixpkgs-git { system = pkgs.stdenv.hostPlatform.system; }).git}/bin/git";
         NIX_BIN = "${pkgs.nix}/bin/nix";
+        NPC_REV = self.rev or "main";
       };
       overlay =
         final: prev:
@@ -40,7 +41,7 @@
             commonArgs
             // {
               cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-              inherit (env final) GIT_BIN NIX_BIN;
+              inherit (env final) GIT_BIN NIX_BIN NPC_REV;
             }
           );
         };
@@ -81,7 +82,7 @@
             pkgs.rust-bin.stable.latest.default
             pkgs.svg-term
           ];
-          inherit (env pkgs) GIT_BIN NIX_BIN;
+          inherit (env pkgs) GIT_BIN NIX_BIN NPC_REV;
         };
       }
     );

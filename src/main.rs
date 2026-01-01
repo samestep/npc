@@ -888,10 +888,10 @@ fn filter_node(node: &FlakeNode) -> Option<(Branch, Sha)> {
         }),
     ) = (&node.original, &node.locked)
         && let Ok(branch) = branch.as_deref().unwrap_or("master").parse()
-        && owner_original == "NixOS"
-        && repo_original == "nixpkgs"
-        && owner_locked == "NixOS"
-        && repo_locked == "nixpkgs"
+        && owner_original.eq_ignore_ascii_case("NixOS")
+        && repo_original.eq_ignore_ascii_case("nixpkgs")
+        && owner_locked.eq_ignore_ascii_case("NixOS")
+        && repo_locked.eq_ignore_ascii_case("nixpkgs")
     {
         Some((branch, *rev))
     } else {

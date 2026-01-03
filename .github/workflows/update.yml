@@ -15,7 +15,7 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - uses: actions/checkout@v6
       - run: nix flake update 2> >(tee nix-flake-update.txt >&2)
-      - run: cargo update 2> >(tee cargo-lock.txt >&2)
+      - run: nix develop --command cargo update 2> >(tee cargo-lock.txt >&2)
       - run: nix flake check --print-build-logs
       - name: Generate pull request body
         id: body

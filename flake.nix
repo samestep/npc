@@ -9,7 +9,8 @@
     };
     # This is the last stable release with a Git version earlier than v2.48.0,
     # which introduced a bug that sometimes causes `git fetch` to fail on
-    # partial clones like the one `npc` uses.
+    # partial clones like the one `npc` uses:
+    # https://lore.kernel.org/git/20251017155754.1425091-1-sam@samestep.com/
     nixpkgs-git.url = "github:NixOS/nixpkgs/nixos-24.11";
   };
   outputs =

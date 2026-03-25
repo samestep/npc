@@ -37,7 +37,7 @@ Without `npc`, you could either
 
 (Usually the second one.)
 
-With `npc`, you can simply `npc bisect` directly in your own project to find what was the last time `nixpkgs-unstable` pointed to a commit that works for you, trying only commits to which that branch has pointed at some point in the past, and skipping everything else. Then commit the change to `flake.lock`, and continue on your way.
+With `npc`, you can simply `npc bisect` directly in your own project to find what was the last time `nixpkgs-unstable` pointed to a commit that works for you, trying only commits to which that branch has pointed at some point in the past, and skipping everything else. Then commit the change to your lock file, and continue on your way.
 
 ## Installation
 
@@ -173,7 +173,7 @@ a8d610af3f1a5fb71e23e08434d8d61a466fc942 2025-11-20 01:07:48 -0500
 
 If you don't pass `-n`/`--max-count` then there will be too many commits to fit on one screen, so the Git pager will be used to let you scroll through the list of commits, search for specific commits or dates, etc.
 
-If you are in a directory that has a `flake.lock` file, you don't need to specify the branch name explicitly; `npc` will determine it automatically:
+If you are in a directory that has a `flake.lock` or `devenv.lock` file, you don't need to specify the branch name explicitly; `npc` will determine it automatically:
 
 ```sh
 npc log
@@ -181,19 +181,21 @@ npc log
 
 There are a couple caveats to this, though:
 
-- Currently `npc` only looks for flake inputs that look like `github:NixOS/nixpkgs` optionally followed by some branch name, and ignores other possible ways of specifying Nixpkgs. If your flake refers to the Nixpkgs repo in a different way that you'd like `npc` to support, please [let me know](CONTRIBUTING.md)!
+- Currently `npc` only looks for flake inputs that look like `github:NixOS/nixpkgs` optionally followed by some branch name, and ignores other possible ways of specifying Nixpkgs. If your lock file refers to the Nixpkgs repo in a different way that you'd like `npc` to support, please [let me know](CONTRIBUTING.md)!
 
-- If your `flake.lock` file has multiple independent versions of Nixpkgs, even if they happen to currently point to the same commit, `npc` will not automatically choose one; you'll need to explicitly choose one yourself via the `--input` flag:
+- If your lock file has multiple independent versions of Nixpkgs, even if they happen to currently point to the same commit, `npc` will not automatically choose one; you'll need to explicitly choose one yourself via the `--input` flag:
 
   ```sh
   npc log --input nixpkgs
   ```
 
-- The `log` subcommand always just prints all the commits that a Nixpkgs branch has ever pointed to according to the `npc` cache, modulo the `-n`/`--max-count` argument. That is, it may even show commits newer than the commit you currently have in your `flake.lock`.
+- The `log` subcommand always just prints all the commits that a Nixpkgs branch has ever pointed to according to the `npc` cache, modulo the `-n`/`--max-count` argument. That is, it may even show commits newer than the commit you currently have in your lock file.
+
+If you want to pick a specific lock file (for example, when both `flake.lock` and `devenv.lock` are present), pass `--lock-file PATH`.
 
 ### `npc checkout`
 
-This command runs [`nix flake update`](https://nix.dev/manual/nix/2.32/command-ref/new-cli/nix3-flake-update) with [`--override-input`](https://nix.dev/manual/nix/2.32/command-ref/new-cli/nix3-flake-update#opt-override-input) to modify your `flake.lock` file:
+This command runs [`nix flake update`](https://nix.dev/manual/nix/2.32/command-ref/new-cli/nix3-flake-update) with [`--override-input`](https://nix.dev/manual/nix/2.32/command-ref/new-cli/nix3-flake-update#opt-override-input) to modify your lock file (by default `flake.lock`, or `devenv.lock` if `flake.lock` is missing):
 
 ```sh
 # Fun fact: this is the most recent commit that was on
@@ -202,21 +204,23 @@ This command runs [`nix flake update`](https://nix.dev/manual/nix/2.32/command-r
 npc checkout 1d7db1b9e4cf1ee075a9f52e5c36f7b9f4207502
 ```
 
-Just like the `log` subcommand, `checkout` attempts to use your `flake.lock` to automatically infer the name of the flake input to modify. Similarly, if there are multiple instances of Nixpkgs in `flake.lock` then it will ask you to explicitly specify one.
+Just like the `log` subcommand, `checkout` attempts to use your lock file to automatically infer the name of the flake input to modify. Similarly, if there are multiple instances of Nixpkgs in the lock file then it will ask you to explicitly specify one.
 
-Other than saving you some typing, the primary difference between this and just running `nix flake update` yourself is that it checks whether the commit you give it is actually a commit that has been a tip of your Nixpkgs branch at some point in the past. If not, that's an error. The goal of this is to maintain consistency and reduce surprises: if your `flake.nix` says you're using the `nixos-unstable` branch, it'd be weird for your `flake.lock` to list a commit that has never been the tip of that branch.
+You can override the detected lock file with `--lock-file PATH`.
+
+Other than saving you some typing, the primary difference between this and just running `nix flake update` yourself is that it checks whether the commit you give it is actually a commit that has been a tip of your Nixpkgs branch at some point in the past. If not, that's an error. The goal of this is to maintain consistency and reduce surprises: if your `flake.nix` says you're using the `nixos-unstable` branch, it'd be weird for your lock file to list a commit that has never been the tip of that branch.
 
 ### `npc bisect`
 
 This is like `git bisect`, except instead finding the commit in your repository that introduced a bug, it finds the most recent Nixpkgs commit that doesn't have the bug but was at some point the tip of a given branch.
 
-The easiest way to use this is in a flake where it can automatically do the equivalent of `npc checkout` while narrowing in on a specific commit. But you can also do it without a `flake.lock` if you specify a branch; the difference is just that you'll need to explicity specify each commit, rather than `npc` automatically reading the current commit from `flake.lock` at each step.
+The easiest way to use this is in a flake where it can automatically do the equivalent of `npc checkout` while narrowing in on a specific commit. But you can also do it without a lock file if you specify a branch; the difference is just that you'll need to explicity specify each commit, rather than `npc` automatically reading the current commit from the lock file at each step.
 
 Note that if you are currently bisecting in a given directory, running `npc status` will also print the current bisection status.
 
 #### `npc bisect start`
 
-Just like `checkout`, if you have exactly one Nixpkgs input in `flake.lock` then you don't need to specify any further information:
+Just like `checkout`, if you have exactly one Nixpkgs input in the lock file then you don't need to specify any further information:
 
 ```sh
 npc bisect start
@@ -224,19 +228,21 @@ npc bisect start
 
 If you have multiple Nixpkgs inputs then you need to specify one via `--input` on this command. Since bisection status is stored per directory, you only need to specify that when you start bisecting, and not each time you mark a commit as `bad` or `good`.
 
+As with the other commands, you can point at a specific lock file using `--lock-file PATH`.
+
 Either way, that will start bisecting in "flake mode"; if you instead want to bisect outside the context of any flake, simply specify a branch:
 
 ```sh
 npc bisect start nixpkgs-unstable
 ```
 
-Note that if you specify a branch, the bisection will not use "flake mode" even if you also have a unique Nixpkgs input with that branch in `flake.lock`. Specifying a branch here will cause the other `npc bisect` commands to ignore `flake.lock` entirely.
+Note that if you specify a branch, the bisection will not use "flake mode" even if you also have a unique Nixpkgs input with that branch in the lock file. Specifying a branch here will cause the other `npc bisect` commands to ignore the lock file entirely.
 
 #### `npc bisect bad` / `npc bisect new`
 
 These subcommands are aliases of each other, just like with Git. They mark a Nixpkgs commit as being broken, or more generally, as being after the change that we are trying to pinpoint.
 
-If you are bisecting in "flake mode" then you can run this with no argument, and `npc` will read the current commit from your `flake.lock` according to whatever flake input was determined when you first started bisecting:
+If you are bisecting in "flake mode" then you can run this with no argument, and `npc` will read the current commit from your lock file according to whatever flake input was determined when you first started bisecting:
 
 ```sh
 npc bisect bad
@@ -258,7 +264,7 @@ Once you finish bisecting, all the state is still stored. This is to allow you t
 npc bisect reset
 ```
 
-The main difference from `git bisect reset` is that this only deletes the bisection state, and does not make any further modifications to your `flake.lock`. That is, it does not bring you back to the original Nixpkgs commit you were on before you started bisecting; you'd need to do that manually if you didn't want to end up on the commit that `npc bisect` found.
+The main difference from `git bisect reset` is that this only deletes the bisection state, and does not make any further modifications to your lock file. That is, it does not bring you back to the original Nixpkgs commit you were on before you started bisecting; you'd need to do that manually if you didn't want to end up on the commit that `npc bisect` found.
 
 ## Contributing
 

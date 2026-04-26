@@ -37,6 +37,7 @@ const URL: &str = concat!(
 
 const GIT: &str = env!("GIT_BIN");
 const NIX: &str = env!("NIX_BIN");
+const DEVENV: &str = "devenv";
 
 const REMOTES: &str = "
 origin\thttps://github.com/NixOS/nixpkgs.git (fetch) [tree:0]
@@ -481,7 +482,7 @@ impl Cache {
                 None => bail!("please specify a commit"),
                 Some(input) => {
                     // The `resolve` function doesn't allow both branch and input to be `Some`.
-                    let (_, input) = resolve(None, Some(input))?;
+                    let (_, input, _) = resolve(None, Some(input), bisection.lock_file.clone())?;
                     // The returned input could only be `None` if we had given a `None` input.
                     let FlakeInput { name, rev } = input.unwrap();
                     bisection.input = Some(name); // Restore the field we took earlier.
@@ -518,13 +519,16 @@ impl Cache {
         fs::write(path, json)?;
         bisection.print();
         if let Some(input) = &bisection.input {
+            let Some(lock_file) = bisection.lock_file.as_deref() else {
+                bail!("could not determine lock file to update");
+            };
             let status = bisection.status();
             if status.done
                 && let Some((good, _)) = status.last_good
             {
-                flake_update(input, good)?;
+                update_lock(input, good, lock_file)?;
             } else if let Some(next) = bisection.next {
-                flake_update(input, next)?;
+                update_lock(input, next, lock_file)?;
             }
         }
         Ok(())
@@ -828,27 +832,25 @@ struct FlakeLock {
 }
 
 impl FlakeLock {
-    fn new() -> anyhow::Result<Option<Self>> {
-        let err = match fs::read_to_string("flake.lock") {
+    fn load(path: &Path) -> anyhow::Result<Self> {
+        let label = lock_label(path);
+        let err = match fs::read_to_string(path) {
             Ok(json) => match serde_json::from_str::<FlakeLock>(&json) {
                 Ok(flake_lock) => {
                     let v = flake_lock.version;
                     if v != 7 {
-                        bail!("expected `flake.lock` format version 7 but this one is version {v}");
+                        bail!("expected {label} format version 7 but this one is version {v}");
                     }
-                    return Ok(Some(flake_lock));
+                    return Ok(flake_lock);
                 }
                 Err(err) => anyhow!(err),
             },
-            Err(err) => match err.kind() {
-                io::ErrorKind::NotFound => return Ok(None),
-                _ => anyhow!(err),
-            },
+            Err(err) => anyhow!(err),
         };
-        Err(err.context("`flake.lock` broken"))
+        Err(err.context(format!("{label} broken")))
     }
 
-    fn resolve(&self, path: &[impl AsRef<str>]) -> anyhow::Result<&str> {
+    fn resolve(&self, path: &[impl AsRef<str>], label: &str) -> anyhow::Result<&str> {
         let mut key: &str = &self.root;
         for name in path {
             let name = name.as_ref();
@@ -857,12 +859,12 @@ impl FlakeLock {
                 ..
             }) = self.nodes.get(key)
             else {
-                bail!("could not find inputs for node {key} in `flake.lock`");
+                bail!("could not find inputs for node {key} in {label}");
             };
             match inputs.get(name) {
-                None => bail!("node {key} in `flake.lock` has no input named {name}"),
+                None => bail!("node {key} in {label} has no input named {name}"),
                 Some(FlakePath::Direct(new_key)) => key = new_key,
-                Some(FlakePath::Indirect(path)) => key = self.resolve(path)?,
+                Some(FlakePath::Indirect(path)) => key = self.resolve(path, label)?,
             }
         }
         Ok(key)
@@ -902,24 +904,40 @@ fn filter_node(node: &FlakeNode) -> Option<(Branch, Sha)> {
 fn resolve(
     branch: Option<Branch>,
     flake_input: Option<String>,
-) -> anyhow::Result<(Branch, Option<FlakeInput>)> {
-    match (branch, flake_input, FlakeLock::new()?) {
-        (Some(_), Some(_), _) => bail!("cannot specify both branch and `--input`"),
-        (_, Some(_), None) => bail!("specified `--input` but no `flake.lock`"),
-        (None, None, None) => bail!("no branch specified and no `flake.lock` found"),
-        (Some(branch), None, _) => Ok((branch, None)),
-        (None, Some(name), Some(flake_lock)) => {
+    lock_file: Option<PathBuf>,
+) -> anyhow::Result<(Branch, Option<FlakeInput>, Option<PathBuf>)> {
+    if branch.is_some() && flake_input.is_some() {
+        bail!("cannot specify both branch and `--input`");
+    }
+
+    let lock_file = select_lock_file(lock_file)?;
+    let mut flake_lock = None::<(PathBuf, FlakeLock)>;
+    if branch.is_none() || flake_input.is_some() {
+        let Some(path) = lock_file.clone() else {
+            if flake_input.is_some() {
+                bail!("specified `--input` but no lock file found");
+            }
+            bail!("no branch specified and no lock file found");
+        };
+        flake_lock = Some((path.clone(), FlakeLock::load(&path)?));
+    }
+
+    match (branch, flake_input, flake_lock) {
+        (Some(branch), None, _) => Ok((branch, None, None)),
+        (None, Some(name), Some((path, flake_lock))) => {
+            let label = lock_label(&path);
             let parts: Vec<_> = name.split('/').collect();
-            let key = flake_lock.resolve(&parts)?;
+            let key = flake_lock.resolve(&parts, &label)?;
             let Some(node) = flake_lock.nodes.get(key) else {
-                bail!("no node named {key} in `flake.lock`");
+                bail!("no node named {key} in {label}");
             };
             let Some((bran, rev)) = filter_node(node) else {
                 bail!("expected Nixpkgs in flake input named {name}");
             };
-            Ok((bran, Some(FlakeInput { name, rev })))
+            Ok((bran, Some(FlakeInput { name, rev }), Some(path)))
         }
-        (None, None, Some(flake_lock)) => {
+        (None, None, Some((path, flake_lock))) => {
+            let label = lock_label(&path);
             let mut paths = Vec::new();
             let mut stack = vec![(None, &flake_lock.root)];
             while let Some((path, key)) = stack.pop() {
@@ -942,10 +960,10 @@ fn resolve(
                 Some((index, branch, rev))
             });
             let Some((mut index, branch, rev)) = it.next() else {
-                bail!("no Nixpkgs input found in `flake.lock`");
+                bail!("no Nixpkgs input found in {label}");
             };
             if it.next().is_some() {
-                bail!("multiple Nixpkgs inputs in `flake.lock`; please specify `--input`");
+                bail!("multiple Nixpkgs inputs in {label}; please specify `--input`");
             }
             let mut parts = Vec::<&str>::new();
             while let (Some((parent, part)), _) = paths[index] {
@@ -954,30 +972,77 @@ fn resolve(
             }
             parts.reverse();
             let name = parts.join("/");
-            Ok((branch, Some(FlakeInput { name, rev })))
+            Ok((branch, Some(FlakeInput { name, rev }), Some(path)))
         }
+        _ => bail!("no branch specified and no lock file found"),
     }
 }
 
-fn flake_update(name: &str, sha: Sha) -> anyhow::Result<()> {
+fn update_lock(input: &str, sha: Sha, lock_file: &Path) -> anyhow::Result<()> {
+    let label = lock_label(lock_file);
+    if lock_file
+        .file_name()
+        .is_some_and(|name| name == "devenv.lock")
+    {
+        let top_level = input.split('/').next().unwrap_or(input);
+        let status = Command::new(DEVENV)
+            .args([
+                "update",
+                "--override-input",
+                top_level,
+                &format!("github:NixOS/nixpkgs/{sha}"),
+            ])
+            .status()?;
+        if !status.success() {
+            bail!("failed to update {label}");
+        }
+        return Ok(());
+    }
+
     // Even if the user already has flakes enabled, our hardcoded Nix path may bypass that e.g. on
     // Determinate Nix, so we pass flags to enable them regardless.
-    let status = Command::new(NIX)
-        .args([
-            "--extra-experimental-features",
-            "nix-command flakes",
-            "flake",
-            "update",
-            name,
-            "--override-input",
-            name,
-            &format!("github:NixOS/nixpkgs/{sha}"),
-        ])
-        .status()?;
+    let mut cmd = Command::new(NIX);
+    cmd.args([
+        "--extra-experimental-features",
+        "nix-command flakes",
+        "flake",
+        "update",
+        input,
+        "--override-input",
+        input,
+        &format!("github:NixOS/nixpkgs/{sha}"),
+    ]);
+    if lock_file != Path::new("flake.lock") {
+        cmd.arg("--output-lock-file").arg(lock_file);
+        cmd.arg("--reference-lock-file").arg(lock_file);
+    }
+    let status = cmd.status()?;
     if !status.success() {
-        bail!("failed to update `flake.lock`");
+        bail!("failed to update {label}");
     }
     Ok(())
+}
+
+fn lock_label(path: &Path) -> String {
+    format!("`{}`", path.display())
+}
+
+fn select_lock_file(lock_file: Option<PathBuf>) -> anyhow::Result<Option<PathBuf>> {
+    if let Some(path) = lock_file {
+        if path.try_exists()? {
+            return Ok(Some(path));
+        }
+        bail!("lock file not found: {}", path.display());
+    }
+    let flake_lock = Path::new("flake.lock");
+    if flake_lock.try_exists()? {
+        return Ok(Some(flake_lock.to_path_buf()));
+    }
+    let devenv_lock = Path::new("devenv.lock");
+    if devenv_lock.try_exists()? {
+        return Ok(Some(devenv_lock.to_path_buf()));
+    }
+    Ok(None)
 }
 
 struct BisectStatus {
@@ -994,6 +1059,8 @@ struct BisectStatus {
 struct Bisection {
     branch: Branch,
     input: Option<String>,
+    #[serde(default)]
+    lock_file: Option<PathBuf>,
     bad: IndexMap<Sha, usize>,
     good: IndexMap<Sha, usize>,
     next: Option<Sha>,
@@ -1111,12 +1178,16 @@ enum Commands {
         #[clap(long, value_name = "NAME")]
         input: Option<String>,
 
+        /// Path to a lock file (`flake.lock` or `devenv.lock`)
+        #[clap(long, value_name = "PATH")]
+        lock_file: Option<PathBuf>,
+
         /// Limit the number of shown commits
         #[clap(short = 'n', long, value_name = "NUMBER")]
         max_count: Option<usize>,
     },
 
-    /// Set a different Nixpkgs commit in `flake.lock`
+    /// Set a different Nixpkgs commit in the lock file
     Checkout {
         /// Nixpkgs Git revision
         rev: String,
@@ -1124,6 +1195,10 @@ enum Commands {
         /// Slash-separated flake input name
         #[clap(long, value_name = "NAME")]
         input: Option<String>,
+
+        /// Path to a lock file (`flake.lock` or `devenv.lock`)
+        #[clap(long, value_name = "PATH")]
+        lock_file: Option<PathBuf>,
     },
 
     /// Use binary search to find the newest commit of a branch before a bug
@@ -1143,6 +1218,10 @@ enum Bisect {
         /// Slash-separated flake input name
         #[clap(long, value_name = "NAME")]
         input: Option<String>,
+
+        /// Path to a lock file (`flake.lock` or `devenv.lock`)
+        #[clap(long, value_name = "PATH")]
+        lock_file: Option<PathBuf>,
     },
 
     /// Mark this commit as "bad"
@@ -1319,11 +1398,12 @@ async fn main() -> anyhow::Result<()> {
             Commands::Log {
                 branch,
                 input,
+                lock_file,
                 max_count,
             },
         ) => {
             let branch = branch.map(|name| name.parse()).transpose()?;
-            let (branch, _) = resolve(branch, input)?;
+            let (branch, _, _) = resolve(branch, input, lock_file)?;
             let commits = cache.branch(branch)?;
             let mut child = cache
                 .git()
@@ -1351,30 +1431,42 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
 
-        (Ok(cache), Commands::Checkout { rev, input }) => {
+        (
+            Ok(cache),
+            Commands::Checkout {
+                rev,
+                input,
+                lock_file,
+            },
+        ) => {
             let sha = cache.sha(&rev)?;
-            let (branch, Some(input)) = resolve(None, input)? else {
+            let (branch, Some(input), Some(lock_file)) = resolve(None, input, lock_file)? else {
                 bail!("could not determine flake input to update");
             };
             if !cache.branch(branch)?.contains(&sha) {
                 bail!("{sha} not found in history of {branch}");
             };
-            flake_update(&input.name, sha)?;
+            update_lock(&input.name, sha, &lock_file)?;
             Ok(())
         }
 
         (Ok(cache), Commands::Bisect { bisect }) => {
             let path = cache.path(CacheKey::Bisect(&env::current_dir()?));
             match bisect {
-                Bisect::Start { branch, input } => {
+                Bisect::Start {
+                    branch,
+                    input,
+                    lock_file,
+                } => {
                     if fs::exists(&path)? {
                         bail!("already bisecting here; to start anew, run `{NAME} bisect reset`");
                     }
                     let branch = branch.map(|name| name.parse()).transpose()?;
-                    let (branch, input) = resolve(branch, input)?;
+                    let (branch, input, lock_file) = resolve(branch, input, lock_file)?;
                     let bisection = Bisection {
                         branch,
                         input: input.map(|input| input.name),
+                        lock_file,
                         bad: IndexMap::new(),
                         good: IndexMap::new(),
                         next: None,

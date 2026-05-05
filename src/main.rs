@@ -1326,6 +1326,9 @@ async fn main() -> anyhow::Result<()> {
             let branch = branch.map(|name| name.parse()).transpose()?;
             let (branch, _) = resolve(branch, input)?;
             let commits = cache.branch(branch)?;
+            if commits.is_empty() || max_count == Some(0) {
+                return Ok(()); // Passing Git no commits would make it print the current `master`.
+            }
             let mut child = cache
                 .git()
                 .args([

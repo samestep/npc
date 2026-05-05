@@ -577,11 +577,12 @@ struct PrefixId {
 
 impl PrefixId {
     fn new() -> Self {
-        let re = Regex::new(r"(\d+)\.\w+/$").unwrap();
+        // Bizarrely, these IDs can sometimes be negative.
+        let re = Regex::new(r"(-?\d+)\.\w+/$").unwrap();
         Self { re }
     }
 
-    fn get(&self, prefix: &str) -> Option<u128> {
+    fn get(&self, prefix: &str) -> Option<i128> {
         let caps = self.re.captures(prefix)?;
         let id = caps[1].parse().ok()?;
         Some(id)

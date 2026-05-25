@@ -425,23 +425,20 @@ impl Cache {
         self.dir.join(key.name())
     }
 
-    fn git(&self) -> Command {
+    fn git_allow_lazy_fetch(&self) -> Command {
         let mut cmd = git();
+        cmd.arg("-C").arg(self.path(CacheKey::Git));
+        cmd
+    }
+
+    fn git(&self) -> Command {
+        let mut cmd = self.git_allow_lazy_fetch();
         // Because we did a blobless clone, some commands that wouldn't normally need network access
         // might try to lazily fetch objects. We consider it a bug for subcommands other than
         // `fetch` to access the network (modulo `nix flake update` as used by the `checkout` and
         // `bisect` subcommands), so here we disallow that. Unfortunately this seems to cause Git to
         // hang rather than simply exiting with an error, but it's better than nothing.
-        cmd.args(["--no-lazy-fetch", "-C"])
-            .arg(self.path(CacheKey::Git));
-        cmd
-    }
-
-    /// Like `git`, but with lazy fetch enabled. Only safe to call from the `fetch` subcommand,
-    /// which is the one place we allow Git to touch the network.
-    fn git_lazy(&self) -> Command {
-        let mut cmd = git();
-        cmd.arg("-C").arg(self.path(CacheKey::Git));
+        cmd.arg("--no-lazy-fetch");
         cmd
     }
 
@@ -604,7 +601,7 @@ impl Remote {
         }
         let output = self
             .cache
-            .git_lazy()
+            .git_allow_lazy_fetch()
             .args(["show", "master:lib/.version"])
             .output()?;
         if !output.status.success() {

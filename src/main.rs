@@ -1169,48 +1169,49 @@ async fn main() -> anyhow::Result<()> {
             let last_fetched = now();
 
             let cache = match cache_result {
-                Ok(mut cache) => {
-                    cache.last_fetched = last_fetched;
-                    cache
-                }
-                Err(PartialCache { dir, missing_git }) => {
+                Err(PartialCache { dir, missing_git }) if missing_git => {
                     let cache = Cache {
                         dir,
                         last_fetched,
                         releases: Vec::new(),
                     };
-                    if missing_git {
-                        let repo = "https://github.com/NixOS/nixpkgs.git";
-                        // We shouldn't need any trees or blobs, only history information.
-                        let status = git()
-                            .args(["clone", "--mirror", "--filter=tree:0", repo])
-                            .arg(cache.path(CacheKey::Git))
-                            .status()?;
-                        if !status.success() {
-                            bail!("failed to clone {repo}");
+                    let repo = "https://github.com/NixOS/nixpkgs.git";
+                    // Other than `.lib/version`, we don't need any trees or blobs.
+                    let status = git()
+                        .args(["clone", "--mirror", "--filter=tree:0", repo])
+                        .arg(cache.path(CacheKey::Git))
+                        .status()?;
+                    if !status.success() {
+                        bail!("failed to clone {repo}");
+                    }
+                    cache
+                }
+                _ => {
+                    let cache = match cache_result {
+                        Ok(mut cache) => {
+                            cache.last_fetched = last_fetched;
+                            cache
                         }
+                        Err(PartialCache { dir, .. }) => Cache {
+                            dir,
+                            last_fetched,
+                            releases: Vec::new(),
+                        },
+                    };
+                    let status = cache
+                        .git()
+                        .args(["fetch", "--no-show-forced-updates"])
+                        .status()?;
+                    // Without `--no-show-forced-updates`, Git spends a lot of time figuring out
+                    // that all the updates to refs/pull/*/head and refs/pull/*/merge were forced.
+                    if !status.success() {
+                        bail!("failed to fetch from Git");
                     }
                     cache
                 }
             };
 
             let mut remote = Remote::new(cache).await;
-
-            // Fetch from Git before reading anything else so that every subsequent step
-            // (release detection, channel fetching, listing `master` commits) sees a single
-            // point-in-time view of Nixpkgs. Any commits S3 publishes after this point get
-            // discarded by `Remote::git_revisions` to keep the cache consistent with the local
-            // Git mirror.
-            let status = remote
-                .cache
-                .git()
-                .args(["fetch", "--no-show-forced-updates"])
-                .status()?;
-            // Without the `--no-show-forced-updates` flag, Git spends a lot of time figuring out
-            // that all the updates to refs/pull/*/head and refs/pull/*/merge were forced.
-            if !status.success() {
-                bail!("failed to fetch from Git");
-            }
 
             remote.cache.releases = {
                 let releases = remote.releases()?;

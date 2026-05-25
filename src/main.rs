@@ -572,43 +572,40 @@ impl Remote {
     }
 
     fn releases(&self) -> anyhow::Result<Vec<Release>> {
-        // Stable releases are derived from the `release-*` branches in Nixpkgs, and the current
-        // prerelease is the version in `lib/.version` on `master`. Both come from Git rather than
-        // S3 so that we can recognize a new release as soon as branch-off happens, without having
-        // to wait for the corresponding beta channel to publish its first build.
-        let oldest = Release { year: 16, month: 9 };
-        let mut releases = BTreeSet::new();
-        let output = self
+        let branches = self
             .cache
             .git()
             .args([
                 "for-each-ref",
-                "--format=%(refname:strip=2)",
+                "--format=%(refname)",
                 "refs/heads/release-*",
             ])
             .output()?;
-        if !output.status.success() {
+        if !branches.status.success() {
             bail!("failed to list Nixpkgs release branches");
         }
-        let re = Regex::new(r"^release-(\d\d\.\d\d)$").unwrap();
-        for line in String::from_utf8(output.stdout)?.lines() {
-            if let Some(caps) = re.captures(line)
-                && let Ok(release) = caps[1].parse::<Release>()
-                && release >= oldest
-            {
+        let mut releases = BTreeSet::new();
+        let re = Regex::new(r"^refs/heads/release-(\d\d\.\d\d)$").unwrap();
+        for line in String::from_utf8(branches.stdout)?.lines() {
+            let Some(caps) = re.captures(line) else {
+                bail!("unexpected release branch name {line}")
+            };
+            let release = caps[1].parse().unwrap();
+            // We omit earlier releases: the bucket has no `git-revision` objects for them.
+            let oldest = Release { year: 16, month: 9 };
+            if release >= oldest {
                 releases.insert(release);
             }
         }
-        let output = self
+        let prerelease = self
             .cache
             .git_allow_lazy_fetch()
             .args(["show", "master:lib/.version"])
             .output()?;
-        if !output.status.success() {
-            bail!("failed to read lib/.version from Nixpkgs master");
+        if !prerelease.status.success() {
+            bail!("failed to check Nixpkgs prerelease version");
         }
-        let prerelease: Release = String::from_utf8(output.stdout)?.trim().parse()?;
-        releases.insert(prerelease);
+        releases.insert(String::from_utf8(prerelease.stdout)?.parse()?);
         Ok(releases.into_iter().collect())
     }
 

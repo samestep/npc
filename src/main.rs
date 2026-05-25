@@ -437,6 +437,14 @@ impl Cache {
         cmd
     }
 
+    /// Like `git`, but with lazy fetch enabled. Only safe to call from the `fetch` subcommand,
+    /// which is the one place we allow Git to touch the network.
+    fn git_lazy(&self) -> Command {
+        let mut cmd = git();
+        cmd.arg("-C").arg(self.path(CacheKey::Git));
+        cmd
+    }
+
     fn sha(&self, rev: &str) -> anyhow::Result<Sha> {
         let output = self
             .git()
@@ -531,40 +539,6 @@ impl Cache {
     }
 }
 
-/// Query the nix-channels bucket to determine the next release.
-async fn prerelease() -> anyhow::Result<Release> {
-    let config = aws_config::defaults(BehaviorVersion::latest())
-        .no_credentials()
-        .region("us-east-1")
-        .load()
-        .await;
-    let s3 = s3::Client::new(&config);
-    let unstable = [
-        Branch::NixpkgsUnstable,
-        Branch::NixosUnstableSmall,
-        Branch::NixosUnstable,
-    ];
-    let outputs = try_join_all(unstable.map(|channel| {
-        s3.get_object()
-            .bucket("nix-channels")
-            .key(channel.to_string())
-            .send()
-    }))
-    .await?;
-    let mut release = None;
-    let re = Regex::new(r"(\d\d\.\d\d)pre\d+\.\w+$").unwrap();
-    for (output, channel) in outputs.into_iter().zip(unstable) {
-        let Some(url) = output.website_redirect_location else {
-            bail!("no redirect URL found for {channel}");
-        };
-        let Some(caps) = re.captures(&url) else {
-            bail!("failed to find prerelease version in {url}");
-        };
-        release = release.max(Some(caps[1].parse().unwrap()));
-    }
-    Ok(release.unwrap())
-}
-
 struct PrefixId {
     re: Regex,
 }
@@ -600,52 +574,44 @@ impl Remote {
         Self { cache, s3 }
     }
 
-    async fn releases(&self) -> anyhow::Result<Vec<Release>> {
+    fn releases(&self) -> anyhow::Result<Vec<Release>> {
+        // Stable releases are derived from the `release-*` branches in Nixpkgs, and the current
+        // prerelease is the version in `lib/.version` on `master`. Both come from Git rather than
+        // S3 so that we can recognize a new release as soon as branch-off happens, without having
+        // to wait for the corresponding beta channel to publish its first build.
+        let oldest = Release { year: 16, month: 9 };
         let mut releases = BTreeSet::new();
-        for (start, re) in [
-            (
-                "nixos/",
-                Regex::new(r"^nixos/(\d\d\.\d\d)(-small)?/$").unwrap(),
-            ),
-            (
-                "nixpkgs/",
-                Regex::new(r"^nixpkgs/(\d\d\.\d\d)-darwin/$").unwrap(),
-            ),
-        ] {
-            let mut continuation_token = None;
-            loop {
-                let output = self
-                    .s3
-                    .list_objects_v2()
-                    .bucket(BUCKET)
-                    .prefix(start)
-                    .delimiter("/")
-                    .set_continuation_token(continuation_token)
-                    .send()
-                    .await?;
-                let prefixes = output
-                    .common_prefixes
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|item| item.prefix.ok_or_else(|| anyhow!("missing prefix")))
-                    .collect::<anyhow::Result<Vec<String>>>()?;
-                for prefix in prefixes {
-                    if let Some(caps) = re.captures(&prefix) {
-                        let release: Release = caps[1].parse().unwrap();
-                        // Omit earlier releases: the bucket has no `git-revision` objects for them.
-                        let oldest = Release { year: 16, month: 9 };
-                        if release >= oldest {
-                            releases.insert(release);
-                        }
-                    }
-                }
-                match output.next_continuation_token {
-                    Some(token) => continuation_token = Some(token),
-                    None => break,
-                };
+        let output = self
+            .cache
+            .git()
+            .args([
+                "for-each-ref",
+                "--format=%(refname:strip=2)",
+                "refs/heads/release-*",
+            ])
+            .output()?;
+        if !output.status.success() {
+            bail!("failed to list Nixpkgs release branches");
+        }
+        let re = Regex::new(r"^release-(\d\d\.\d\d)$").unwrap();
+        for line in String::from_utf8(output.stdout)?.lines() {
+            if let Some(caps) = re.captures(line)
+                && let Ok(release) = caps[1].parse::<Release>()
+                && release >= oldest
+            {
+                releases.insert(release);
             }
         }
-        releases.insert(prerelease().await?);
+        let output = self
+            .cache
+            .git_lazy()
+            .args(["show", "master:lib/.version"])
+            .output()?;
+        if !output.status.success() {
+            bail!("failed to read lib/.version from Nixpkgs master");
+        }
+        let prerelease: Release = String::from_utf8(output.stdout)?.trim().parse()?;
+        releases.insert(prerelease);
         Ok(releases.into_iter().collect())
     }
 
@@ -670,14 +636,28 @@ impl Remote {
                     bail!("unexpected extra Git output");
                 };
                 let sha = match line.parse() {
-                    Ok(sha) => sha,
+                    Ok(sha) => Some(sha),
                     Err(_) => {
                         let key = format!("{prefix}git-revision");
                         let output = self.s3.get_object().bucket(BUCKET).key(key).send().await?;
-                        String::from_utf8(output.body.collect().await?.to_vec())?.parse()?
+                        let sha: Sha =
+                            String::from_utf8(output.body.collect().await?.to_vec())?.parse()?;
+                        // If the full SHA isn't in our local Git clone, this S3 build references a
+                        // commit that landed after our `git fetch`. Discard it so the cache stays
+                        // consistent with the local Git mirror and isn't ahead of it.
+                        let exists = self
+                            .cache
+                            .git()
+                            .args(["cat-file", "-e", &sha.to_string()])
+                            .stderr(Stdio::null())
+                            .status()?
+                            .success();
+                        exists.then_some(sha)
                     }
                 };
-                callback(sha, prefix);
+                if let Some(sha) = sha {
+                    callback(sha, prefix);
+                }
             }
         }
         Ok(())
@@ -1216,8 +1196,24 @@ async fn main() -> anyhow::Result<()> {
 
             let mut remote = Remote::new(cache).await;
 
+            // Fetch from Git before reading anything else so that every subsequent step
+            // (release detection, channel fetching, listing `master` commits) sees a single
+            // point-in-time view of Nixpkgs. Any commits S3 publishes after this point get
+            // discarded by `Remote::git_revisions` to keep the cache consistent with the local
+            // Git mirror.
+            let status = remote
+                .cache
+                .git()
+                .args(["fetch", "--no-show-forced-updates"])
+                .status()?;
+            // Without the `--no-show-forced-updates` flag, Git spends a lot of time figuring out
+            // that all the updates to refs/pull/*/head and refs/pull/*/merge were forced.
+            if !status.success() {
+                bail!("failed to fetch from Git");
+            }
+
             remote.cache.releases = {
-                let releases = remote.releases().await?;
+                let releases = remote.releases()?;
                 let mut lines = String::new();
                 for release in &releases {
                     writeln!(&mut lines, "{release}")?;
@@ -1233,20 +1229,6 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
 
-            // We fetch from Git after fetching from S3 so that, once we're done, all the commit
-            // hashes we got from S3 should also be in our local Git clone.
-            let status = remote
-                .cache
-                .git()
-                .args(["fetch", "--no-show-forced-updates"])
-                .status()?;
-            // Without the `--no-show-forced-updates` flag, Git prints spends a lot of time figuring
-            // out that all the updates to refs/pull/*/head and refs/pull/*/merge were forced.
-            if !status.success() {
-                bail!("failed to fetch from Git");
-            }
-
-            // List `master` commits only after `git fetch` so that we don't miss any new ones.
             let output = remote
                 .cache
                 .git()

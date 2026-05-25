@@ -1240,8 +1240,8 @@ async fn main() -> anyhow::Result<()> {
                 .git()
                 .args(["fetch", "--no-show-forced-updates"])
                 .status()?;
-            // Without the `--no-show-forced-updates` flag, Git prints spends a lot of time figuring
-            // out that all the updates to refs/pull/*/head and refs/pull/*/merge were forced.
+            // Without the `--no-show-forced-updates` flag, Git spends a lot of time figuring out
+            // that all the updates to refs/pull/*/head and refs/pull/*/merge were forced.
             if !status.success() {
                 bail!("failed to fetch from Git");
             }

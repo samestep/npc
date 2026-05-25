@@ -1,6 +1,6 @@
 use std::{
     cell::Cell,
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     env,
     fmt::{self, Write as _},
     fs,
@@ -139,7 +139,7 @@ impl<'de> Visitor<'de> for ShaVisitor {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct Release {
     year: u8,
     month: u8,
@@ -560,13 +560,7 @@ async fn prerelease() -> anyhow::Result<Release> {
         let Some(caps) = re.captures(&url) else {
             bail!("failed to find prerelease version in {url}");
         };
-        let rel = caps[1].parse().unwrap();
-        if let Some(other) = release
-            && rel != other
-        {
-            bail!("can't decide between prerelease versions {other} and {rel}");
-        }
-        release = Some(rel);
+        release = release.max(Some(caps[1].parse().unwrap()));
     }
     Ok(release.unwrap())
 }
@@ -607,42 +601,52 @@ impl Remote {
     }
 
     async fn releases(&self) -> anyhow::Result<Vec<Release>> {
-        let mut releases = Vec::new();
-        let re = Regex::new(r"^nixos/(\d\d\.\d\d)/$").unwrap();
-        let mut continuation_token = None;
-        loop {
-            let output = self
-                .s3
-                .list_objects_v2()
-                .bucket(BUCKET)
-                .prefix("nixos/")
-                .delimiter("/")
-                .set_continuation_token(continuation_token)
-                .send()
-                .await?;
-            let prefixes = output
-                .common_prefixes
-                .unwrap_or_default()
-                .into_iter()
-                .map(|item| item.prefix.ok_or_else(|| anyhow!("missing prefix")))
-                .collect::<anyhow::Result<Vec<String>>>()?;
-            for prefix in prefixes {
-                if let Some(caps) = re.captures(&prefix) {
-                    let release: Release = caps[1].parse().unwrap();
-                    // We omit earlier releases: the bucket has no `git-revision` objects for them.
-                    let oldest = Release { year: 16, month: 9 };
-                    if release.year > 16 || release == oldest {
-                        releases.push(release);
+        let mut releases = BTreeSet::new();
+        for (start, re) in [
+            (
+                "nixos/",
+                Regex::new(r"^nixos/(\d\d\.\d\d)(-small)?/$").unwrap(),
+            ),
+            (
+                "nixpkgs/",
+                Regex::new(r"^nixpkgs/(\d\d\.\d\d)-darwin/$").unwrap(),
+            ),
+        ] {
+            let mut continuation_token = None;
+            loop {
+                let output = self
+                    .s3
+                    .list_objects_v2()
+                    .bucket(BUCKET)
+                    .prefix(start)
+                    .delimiter("/")
+                    .set_continuation_token(continuation_token)
+                    .send()
+                    .await?;
+                let prefixes = output
+                    .common_prefixes
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|item| item.prefix.ok_or_else(|| anyhow!("missing prefix")))
+                    .collect::<anyhow::Result<Vec<String>>>()?;
+                for prefix in prefixes {
+                    if let Some(caps) = re.captures(&prefix) {
+                        let release: Release = caps[1].parse().unwrap();
+                        // Omit earlier releases: the bucket has no `git-revision` objects for them.
+                        let oldest = Release { year: 16, month: 9 };
+                        if release >= oldest {
+                            releases.insert(release);
+                        }
                     }
                 }
+                match output.next_continuation_token {
+                    Some(token) => continuation_token = Some(token),
+                    None => break,
+                };
             }
-            match output.next_continuation_token {
-                Some(token) => continuation_token = Some(token),
-                None => break,
-            };
         }
-        releases.push(prerelease().await?);
-        Ok(releases)
+        releases.insert(prerelease().await?);
+        Ok(releases.into_iter().collect())
     }
 
     async fn git_revisions(

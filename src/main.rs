@@ -425,15 +425,20 @@ impl Cache {
         self.dir.join(key.name())
     }
 
-    fn git(&self) -> Command {
+    fn git_allow_lazy_fetch(&self) -> Command {
         let mut cmd = git();
+        cmd.arg("-C").arg(self.path(CacheKey::Git));
+        cmd
+    }
+
+    fn git(&self) -> Command {
+        let mut cmd = self.git_allow_lazy_fetch();
         // Because we did a blobless clone, some commands that wouldn't normally need network access
         // might try to lazily fetch objects. We consider it a bug for subcommands other than
         // `fetch` to access the network (modulo `nix flake update` as used by the `checkout` and
         // `bisect` subcommands), so here we disallow that. Unfortunately this seems to cause Git to
         // hang rather than simply exiting with an error, but it's better than nothing.
-        cmd.args(["--no-lazy-fetch", "-C"])
-            .arg(self.path(CacheKey::Git));
+        cmd.arg("--no-lazy-fetch");
         cmd
     }
 
@@ -531,40 +536,6 @@ impl Cache {
     }
 }
 
-/// Query the nix-channels bucket to determine the next release.
-async fn prerelease() -> anyhow::Result<Release> {
-    let config = aws_config::defaults(BehaviorVersion::latest())
-        .no_credentials()
-        .region("us-east-1")
-        .load()
-        .await;
-    let s3 = s3::Client::new(&config);
-    let unstable = [
-        Branch::NixpkgsUnstable,
-        Branch::NixosUnstableSmall,
-        Branch::NixosUnstable,
-    ];
-    let outputs = try_join_all(unstable.map(|channel| {
-        s3.get_object()
-            .bucket("nix-channels")
-            .key(channel.to_string())
-            .send()
-    }))
-    .await?;
-    let mut release = None;
-    let re = Regex::new(r"(\d\d\.\d\d)pre\d+\.\w+$").unwrap();
-    for (output, channel) in outputs.into_iter().zip(unstable) {
-        let Some(url) = output.website_redirect_location else {
-            bail!("no redirect URL found for {channel}");
-        };
-        let Some(caps) = re.captures(&url) else {
-            bail!("failed to find prerelease version in {url}");
-        };
-        release = release.max(Some(caps[1].parse().unwrap()));
-    }
-    Ok(release.unwrap())
-}
-
 struct PrefixId {
     re: Regex,
 }
@@ -600,52 +571,41 @@ impl Remote {
         Self { cache, s3 }
     }
 
-    async fn releases(&self) -> anyhow::Result<Vec<Release>> {
+    fn releases(&self) -> anyhow::Result<Vec<Release>> {
+        let branches = self
+            .cache
+            .git()
+            .args([
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/heads/release-*",
+            ])
+            .output()?;
+        if !branches.status.success() {
+            bail!("failed to list Nixpkgs release branches");
+        }
         let mut releases = BTreeSet::new();
-        for (start, re) in [
-            (
-                "nixos/",
-                Regex::new(r"^nixos/(\d\d\.\d\d)(-small)?/$").unwrap(),
-            ),
-            (
-                "nixpkgs/",
-                Regex::new(r"^nixpkgs/(\d\d\.\d\d)-darwin/$").unwrap(),
-            ),
-        ] {
-            let mut continuation_token = None;
-            loop {
-                let output = self
-                    .s3
-                    .list_objects_v2()
-                    .bucket(BUCKET)
-                    .prefix(start)
-                    .delimiter("/")
-                    .set_continuation_token(continuation_token)
-                    .send()
-                    .await?;
-                let prefixes = output
-                    .common_prefixes
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|item| item.prefix.ok_or_else(|| anyhow!("missing prefix")))
-                    .collect::<anyhow::Result<Vec<String>>>()?;
-                for prefix in prefixes {
-                    if let Some(caps) = re.captures(&prefix) {
-                        let release: Release = caps[1].parse().unwrap();
-                        // Omit earlier releases: the bucket has no `git-revision` objects for them.
-                        let oldest = Release { year: 16, month: 9 };
-                        if release >= oldest {
-                            releases.insert(release);
-                        }
-                    }
-                }
-                match output.next_continuation_token {
-                    Some(token) => continuation_token = Some(token),
-                    None => break,
-                };
+        let re = Regex::new(r"^refs/heads/release-(\d\d\.\d\d)$").unwrap();
+        for line in String::from_utf8(branches.stdout)?.lines() {
+            let Some(caps) = re.captures(line) else {
+                bail!("unexpected release branch name {line}")
+            };
+            let release = caps[1].parse().unwrap();
+            // We omit earlier releases: the bucket has no `git-revision` objects for them.
+            let oldest = Release { year: 16, month: 9 };
+            if release >= oldest {
+                releases.insert(release);
             }
         }
-        releases.insert(prerelease().await?);
+        let prerelease = self
+            .cache
+            .git_allow_lazy_fetch()
+            .args(["show", "master:lib/.version"])
+            .output()?;
+        if !prerelease.status.success() {
+            bail!("failed to check Nixpkgs prerelease version");
+        }
+        releases.insert(String::from_utf8(prerelease.stdout)?.parse()?);
         Ok(releases.into_iter().collect())
     }
 
@@ -669,15 +629,26 @@ impl Remote {
                 let Some(prefix) = prefixes.pop_front() else {
                     bail!("unexpected extra Git output");
                 };
-                let sha = match line.parse() {
-                    Ok(sha) => sha,
+                match line.parse() {
+                    Ok(sha) => callback(sha, prefix),
                     Err(_) => {
                         let key = format!("{prefix}git-revision");
                         let output = self.s3.get_object().bucket(BUCKET).key(key).send().await?;
-                        String::from_utf8(output.body.collect().await?.to_vec())?.parse()?
+                        let sha: Sha =
+                            String::from_utf8(output.body.collect().await?.to_vec())?.parse()?;
+                        // Discard commits that are more recent than our `git fetch` since we won't
+                        // be able to do everything we need to with them.
+                        if self
+                            .cache
+                            .git()
+                            .args(["cat-file", "-e", &sha.to_string()])
+                            .status()?
+                            .success()
+                        {
+                            callback(sha, prefix);
+                        }
                     }
-                };
-                callback(sha, prefix);
+                }
             }
         }
         Ok(())
@@ -1189,26 +1160,43 @@ async fn main() -> anyhow::Result<()> {
             let last_fetched = now();
 
             let cache = match cache_result {
-                Ok(mut cache) => {
-                    cache.last_fetched = last_fetched;
-                    cache
-                }
-                Err(PartialCache { dir, missing_git }) => {
+                Err(PartialCache { dir, missing_git }) if missing_git => {
                     let cache = Cache {
                         dir,
                         last_fetched,
                         releases: Vec::new(),
                     };
-                    if missing_git {
-                        let repo = "https://github.com/NixOS/nixpkgs.git";
-                        // We shouldn't need any trees or blobs, only history information.
-                        let status = git()
-                            .args(["clone", "--mirror", "--filter=tree:0", repo])
-                            .arg(cache.path(CacheKey::Git))
-                            .status()?;
-                        if !status.success() {
-                            bail!("failed to clone {repo}");
+                    let repo = "https://github.com/NixOS/nixpkgs.git";
+                    // Other than `lib/.version`, we don't need any trees or blobs.
+                    let status = git()
+                        .args(["clone", "--mirror", "--filter=tree:0", repo])
+                        .arg(cache.path(CacheKey::Git))
+                        .status()?;
+                    if !status.success() {
+                        bail!("failed to clone {repo}");
+                    }
+                    cache
+                }
+                _ => {
+                    let cache = match cache_result {
+                        Ok(mut cache) => {
+                            cache.last_fetched = last_fetched;
+                            cache
                         }
+                        Err(PartialCache { dir, .. }) => Cache {
+                            dir,
+                            last_fetched,
+                            releases: Vec::new(),
+                        },
+                    };
+                    let status = cache
+                        .git()
+                        .args(["fetch", "--no-show-forced-updates"])
+                        .status()?;
+                    // Without `--no-show-forced-updates`, Git spends a lot of time figuring out
+                    // that all the updates to refs/pull/*/head and refs/pull/*/merge were forced.
+                    if !status.success() {
+                        bail!("failed to fetch from Git");
                     }
                     cache
                 }
@@ -1217,7 +1205,7 @@ async fn main() -> anyhow::Result<()> {
             let mut remote = Remote::new(cache).await;
 
             remote.cache.releases = {
-                let releases = remote.releases().await?;
+                let releases = remote.releases()?;
                 let mut lines = String::new();
                 for release in &releases {
                     writeln!(&mut lines, "{release}")?;
@@ -1233,20 +1221,6 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
 
-            // We fetch from Git after fetching from S3 so that, once we're done, all the commit
-            // hashes we got from S3 should also be in our local Git clone.
-            let status = remote
-                .cache
-                .git()
-                .args(["fetch", "--no-show-forced-updates"])
-                .status()?;
-            // Without the `--no-show-forced-updates` flag, Git spends a lot of time figuring out
-            // that all the updates to refs/pull/*/head and refs/pull/*/merge were forced.
-            if !status.success() {
-                bail!("failed to fetch from Git");
-            }
-
-            // List `master` commits only after `git fetch` so that we don't miss any new ones.
             let output = remote
                 .cache
                 .git()

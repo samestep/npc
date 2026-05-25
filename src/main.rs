@@ -629,28 +629,25 @@ impl Remote {
                 let Some(prefix) = prefixes.pop_front() else {
                     bail!("unexpected extra Git output");
                 };
-                let sha = match line.parse() {
-                    Ok(sha) => Some(sha),
+                match line.parse() {
+                    Ok(sha) => callback(sha, prefix),
                     Err(_) => {
                         let key = format!("{prefix}git-revision");
                         let output = self.s3.get_object().bucket(BUCKET).key(key).send().await?;
                         let sha: Sha =
                             String::from_utf8(output.body.collect().await?.to_vec())?.parse()?;
-                        // If the full SHA isn't in our local Git clone, this S3 build references a
-                        // commit that landed after our `git fetch`. Discard it so the cache stays
-                        // consistent with the local Git mirror and isn't ahead of it.
-                        let exists = self
+                        // Discard commits that are more recent than our `git fetch` since we won't
+                        // be able to do everything we need to with them.
+                        if self
                             .cache
                             .git()
                             .args(["cat-file", "-e", &sha.to_string()])
-                            .stderr(Stdio::null())
                             .status()?
-                            .success();
-                        exists.then_some(sha)
+                            .success()
+                        {
+                            callback(sha, prefix);
+                        }
                     }
-                };
-                if let Some(sha) = sha {
-                    callback(sha, prefix);
                 }
             }
         }

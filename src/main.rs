@@ -1173,7 +1173,7 @@ async fn main() -> anyhow::Result<()> {
                         releases: Vec::new(),
                     };
                     let repo = "https://github.com/NixOS/nixpkgs.git";
-                    // Other than `.lib/version`, we don't need any trees or blobs.
+                    // Other than `lib/.version`, we don't need any trees or blobs.
                     let status = git()
                         .args(["clone", "--mirror", "--filter=tree:0", repo])
                         .arg(cache.path(CacheKey::Git))

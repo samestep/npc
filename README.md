@@ -58,10 +58,10 @@ If you use [Home Manager](https://github.com/nix-community/home-manager) and wou
 ```nix
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
     home-manager = {
-      url = "github:nix-community/home-manager/release-25.11";
+      url = "github:nix-community/home-manager/release-26.05";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     npc.url = "github:samestep/npc";
@@ -94,7 +94,7 @@ Then you can add `npc` to your `home.nix` like this:
 { pkgs, ... }:
 {
   home = {
-    stateVersion = "25.11";
+    stateVersion = "26.05";
     username = "username";
     homeDirectory = "/home/username";
     packages = [
@@ -138,19 +138,19 @@ For all Nixpkgs branches in the previous release or newer, this command tells yo
 
 ```
 $ npc status
-current local time is 2025-11-28 14:48:17 -0500
-last fetched cache at 2025-11-28 14:47:53 -0500
+current local time is 2026-05-25 22:35:12 -0400
+last fetched cache at 2026-05-25 22:34:09 -0400
 
-master                2025-11-28 14:12:53 -0500
-nixpkgs-unstable      2025-11-27 02:58:14 -0500
-nixos-unstable-small  2025-11-27 19:11:30 -0500
-nixos-unstable        2025-11-27 06:14:36 -0500
-nixpkgs-25.11-darwin  2025-11-26 11:09:25 -0500
-nixos-25.11-small     2025-11-27 20:42:38 -0500
-nixos-25.11           2025-11-26 11:09:25 -0500
-nixpkgs-25.05-darwin  2025-11-27 09:19:47 -0500
-nixos-25.05-small     2025-11-28 12:35:20 -0500
-nixos-25.05           2025-11-23 20:37:40 -0500
+master                2026-05-25 22:14:29 -0400
+nixpkgs-unstable      2026-05-25 03:42:19 -0400
+nixos-unstable-small  2026-05-25 10:43:04 -0400
+nixos-unstable        2026-05-23 14:24:25 -0400
+nixpkgs-26.05-darwin  2026-05-24 07:32:15 -0400
+nixos-26.05-small     2026-05-25 01:24:44 -0400
+nixos-26.05           2026-05-24 07:32:15 -0400
+nixpkgs-25.11-darwin  2026-05-24 18:47:38 -0400
+nixos-25.11-small     2026-05-25 04:08:50 -0400
+nixos-25.11           2026-05-22 12:26:26 -0400
 ```
 
 ### `npc log`
@@ -159,16 +159,16 @@ This command prints the history of a Nixpkgs branch:
 
 ```
 $ npc log nixpkgs-unstable -n10
-0d59e0290eefe0f12512043842d7096c4070f30e 2025-11-27 02:58:14 -0500
-5c46f3bd98147c8d82366df95bbef2cab3a967ea 2025-11-26 09:39:26 -0500
-bb813de6d2241bcb1b5af2d3059f560c66329967 2025-11-26 01:22:50 -0500
-dc205f7b4fdb04c8b7877b43edb7b73be7730081 2025-11-25 09:41:04 -0500
-ee09932cedcef15aaf476f9343d1dea2cb77e261 2025-11-23 16:50:36 -0500
-878e468e02bfabeda08c79250f7ad583037f2227 2025-11-22 05:07:53 -0500
-9fe0d00db1794fe493677b1abe9ca6d08965f4d1 2025-11-21 03:16:52 -0500
-a8d610af3f1a5fb71e23e08434d8d61a466fc942 2025-11-20 01:07:48 -0500
-6f374686605df381de8541c072038472a5ea2e2d 2025-11-18 06:19:29 -0500
-0ade817efdde79cbc46b624c849027335ebc25c5 2025-11-17 22:14:24 -0500
+f9d8b65950353691ab56561e7c73d2e1063d810b 2026-05-25 03:42:19 -0400
+d849bb215dcdf71bce3e686839ccdb4219e84b2f 2026-05-23 23:33:00 -0400
+3d8f0f3f72a6cd4d93d0ad13203f2ea1cb7e1456 2026-05-23 07:35:32 -0400
+a0991c886dc83e6e9de01d5266e4842985b1850e 2026-05-22 14:39:28 -0400
+6dedf69f94d03cbe7bdde106f2d4c23ae2a853bf 2026-05-21 21:51:30 -0400
+4a29d733e8a7d5b824c3d8c958a946a9867b3eb2 2026-05-21 04:15:18 -0400
+d99b013d5d1931ad77fe3912ed218170dec5d9a4 2026-05-20 02:38:13 -0400
+d233902339c02a9c334e7e593de68855ad26c4cb 2026-05-15 14:21:44 -0400
+8a1b0127302ea51e05bf4ea5a291743fac442406 2026-05-14 17:33:07 -0400
+27198194e52129ccd8e845e7d5911911e7fea7d7 2026-05-14 08:36:40 -0400
 ```
 
 If you don't pass `-n`/`--max-count` then there will be too many commits to fit on one screen, so the Git pager will be used to let you scroll through the list of commits, search for specific commits or dates, etc.

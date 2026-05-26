@@ -75,7 +75,7 @@ If you use [Home Manager](https://github.com/nix-community/home-manager) and wou
       npc,
     }:
     flake-utils.lib.eachDefaultSystem (system: {
-      homeConfigurations = {
+      legacyPackages.homeConfigurations = {
         "username" = home-manager.lib.homeManagerConfiguration {
           pkgs = import nixpkgs {
             inherit system;

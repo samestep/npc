@@ -1169,7 +1169,7 @@ async fn main() -> anyhow::Result<()> {
                     let repo = "https://github.com/NixOS/nixpkgs.git";
                     // Other than `lib/.version`, we don't need any trees or blobs.
                     let status = git()
-                        .args(["clone", "--mirror", "--filter=tree:0", repo])
+                        .args(["clone", "--bare", "--filter=tree:0", repo])
                         .arg(cache.path(CacheKey::Git))
                         .status()?;
                     if !status.success() {
@@ -1191,10 +1191,9 @@ async fn main() -> anyhow::Result<()> {
                     };
                     let status = cache
                         .git()
-                        .args(["fetch", "--no-show-forced-updates"])
+                        // Ignore `refs/pull/*`.
+                        .args(["fetch", "origin", "+refs/heads/*:refs/heads/*"])
                         .status()?;
-                    // Without `--no-show-forced-updates`, Git spends a lot of time figuring out
-                    // that all the updates to refs/pull/*/head and refs/pull/*/merge were forced.
                     if !status.success() {
                         bail!("failed to fetch from Git");
                     }

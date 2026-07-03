@@ -1075,7 +1075,7 @@ enum Commands {
     /// Delete the cache
     Clean,
 
-    /// Print the status of all branches in the cache
+    /// Print the status of all recent branches in the cache
     Status,
 
     /// List commits a branch has pointed to, in reverse chronological order

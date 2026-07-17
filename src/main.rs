@@ -28,13 +28,6 @@ use thiserror::Error;
 /// The name of this program.
 const NAME: &str = env!("CARGO_PKG_NAME");
 
-const URL: &str = concat!(
-    "https://github.com/samestep/",
-    env!("CARGO_PKG_NAME"),
-    "/tree/",
-    env!("NPC_REV"),
-);
-
 const GIT: &str = env!("GIT_BIN");
 const NIX: &str = env!("NIX_BIN");
 
@@ -1061,7 +1054,7 @@ impl Bisection {
 
 /// Nixpkgs channel history CLI
 #[derive(Parser)]
-#[command(version = URL)]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

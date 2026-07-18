@@ -7,11 +7,6 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # This is the last stable release with a Git version earlier than v2.48.0,
-    # which introduced a bug that sometimes causes `git fetch` to fail on
-    # partial clones like the one `npc` uses:
-    # https://lore.kernel.org/git/20251017155754.1425091-1-sam@samestep.com/
-    nixpkgs-git.url = "github:NixOS/nixpkgs/nixos-24.11";
   };
   outputs =
     {
@@ -20,11 +15,10 @@
       flake-utils,
       crane,
       rust-overlay,
-      nixpkgs-git,
     }:
     let
       env = pkgs: {
-        GIT_BIN = "${(import nixpkgs-git { system = pkgs.stdenv.hostPlatform.system; }).git}/bin/git";
+        GIT_BIN = "${pkgs.git}/bin/git";
         NIX_BIN = "${pkgs.nix}/bin/nix";
       };
       overlay =

@@ -8,8 +8,6 @@ A CLI tool to access the history of Nixpkgs [channels](https://wiki.nixos.org/wi
 
 - [Motivation](#motivation)
 - [Installation](#installation)
-  - [Temporary](#temporary)
-  - [Home Manager](#home-manager)
 - [Usage](#usage)
   - [`npc fetch`](#npc-fetch)
   - [`npc clean`](#npc-clean)
@@ -41,67 +39,10 @@ With `npc`, you can simply `npc bisect` directly in your own project to find wha
 
 ## Installation
 
-### Temporary
-
-This repository provides a [Nix flake](https://wiki.nixos.org/wiki/Flakes), so if you have flakes enabled, the quickest way to use it is via the [`nix shell`](https://nix.dev/manual/nix/2.32/command-ref/new-cli/nix3-env-shell.html) command:
+`npc` is in Nixpkgs, so you can run the following command to start a shell within your shell which has `npc` available on the `PATH`:
 
 ```sh
-nix shell github:samestep/npc
-```
-
-This starts a shell within your shell which has `npc` available on the `PATH`.
-
-### Home Manager
-
-If you use [Home Manager](https://github.com/nix-community/home-manager) and would like to do a more global installation, the easiest way is via the overlay provided by this flake; for instance, your `flake.nix` might look like this:
-
-```nix
-{
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-    flake-utils.url = "github:numtide/flake-utils";
-    home-manager = {
-      url = "github:nix-community/home-manager/release-26.05";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    npc.url = "github:samestep/npc";
-  };
-  outputs =
-    {
-      self,
-      nixpkgs,
-      flake-utils,
-      home-manager,
-      npc,
-    }:
-    flake-utils.lib.eachDefaultSystem (system: {
-      legacyPackages.homeConfigurations = {
-        "username" = home-manager.lib.homeManagerConfiguration {
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ npc.overlays.default ];
-          };
-          modules = [ ./home.nix ];
-        };
-      };
-    });
-}
-```
-
-Then you can add `npc` to your `home.nix` like this:
-
-```nix
-{ pkgs, ... }:
-{
-  home = {
-    stateVersion = "26.05";
-    username = "username";
-    homeDirectory = "/home/username";
-    packages = [
-      pkgs.npc
-    ];
-  };
-}
+nix-shell -p npc
 ```
 
 ## Usage

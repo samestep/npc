@@ -9,12 +9,15 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     str::FromStr,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
 use anyhow::{Context, anyhow, bail};
-use aws_config::{BehaviorVersion, Region};
+use aws_config::{BehaviorVersion, Region, retry::RetryConfig, timeout::TimeoutConfig};
 use aws_sdk_s3 as s3;
 use clap::{Parser, Subcommand};
 use futures::future::try_join_all;
@@ -24,6 +27,7 @@ use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Visitor};
 use thiserror::Error;
+use tokio::sync::Semaphore;
 
 /// The name of this program.
 const NAME: &str = env!("CARGO_PKG_NAME");
@@ -38,6 +42,12 @@ origin\thttps://github.com/NixOS/nixpkgs.git (push)
 .trim_ascii_start();
 
 const BUCKET: &str = "nix-releases";
+
+// `fetch` fans out over every branch and release at once, which without a cap would fire well over
+// a hundred simultaneous requests at S3. That thundering herd of concurrent TLS handshakes is what
+// intermittently trips connect timeouts (see <https://github.com/samestep/npc/issues/45>), so we
+// bound the number of S3 requests we keep in flight at any given moment.
+const MAX_CONCURRENT_REQUESTS: usize = 16;
 
 // We must specify the same region as the bucket or it responds with a `PermanentRedirect` error.
 // This command can be used to check: `curl --head https://nix-releases.s3.amazonaws.com/`
@@ -550,18 +560,32 @@ impl PrefixId {
 struct Remote {
     cache: Cache,
     s3: s3::Client,
+    limiter: Arc<Semaphore>,
 }
 
 impl Remote {
     async fn new(cache: Cache) -> Self {
+        // `fetch` fans out into a large burst of concurrent S3 requests (one per branch per
+        // release, plus per-commit `get_object` fallbacks). That many simultaneous TLS handshakes
+        // can intermittently blow past the SDK's default 3.1s connect timeout, and a correlated
+        // burst of such timeouts also drains the standard retry quota so retries stop kicking in.
+        // Be more patient than the defaults to keep `fetch` reliable under that load. See
+        // <https://github.com/samestep/npc/issues/45>.
+        let timeout = TimeoutConfig::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .build();
+        let retry = RetryConfig::standard().with_max_attempts(6);
         // We use `no_credentials` to avoid authenticating because it's a public bucket.
         let config = aws_config::defaults(BehaviorVersion::latest())
             .no_credentials()
             .region(REGION)
+            .timeout_config(timeout)
+            .retry_config(retry)
             .load()
             .await;
         let s3 = s3::Client::new(&config);
-        Self { cache, s3 }
+        let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
+        Self { cache, s3, limiter }
     }
 
     fn releases(&self) -> anyhow::Result<Vec<Release>> {
@@ -626,9 +650,12 @@ impl Remote {
                     Ok(sha) => callback(sha, prefix),
                     Err(_) => {
                         let key = format!("{prefix}git-revision");
-                        let output = self.s3.get_object().bucket(BUCKET).key(key).send().await?;
-                        let sha: Sha =
-                            String::from_utf8(output.body.collect().await?.to_vec())?.parse()?;
+                        let sha: Sha = {
+                            let _permit = self.limiter.acquire().await?;
+                            let output =
+                                self.s3.get_object().bucket(BUCKET).key(key).send().await?;
+                            String::from_utf8(output.body.collect().await?.to_vec())?.parse()?
+                        };
                         // Discard commits that are more recent than our `git fetch` since we won't
                         // be able to do everything we need to with them.
                         if self
@@ -655,15 +682,17 @@ impl Remote {
     ) -> anyhow::Result<()> {
         let mut continuation_token = None;
         loop {
-            let output = self
-                .s3
-                .list_objects_v2()
-                .bucket(BUCKET)
-                .prefix(channel.prefix(release))
-                .delimiter("/")
-                .set_continuation_token(continuation_token)
-                .send()
-                .await?;
+            let output = {
+                let _permit = self.limiter.acquire().await?;
+                self.s3
+                    .list_objects_v2()
+                    .bucket(BUCKET)
+                    .prefix(channel.prefix(release))
+                    .delimiter("/")
+                    .set_continuation_token(continuation_token)
+                    .send()
+                    .await?
+            };
             let prefixes = output
                 .common_prefixes
                 .unwrap_or_default()

@@ -1694,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "npc"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "aws-config",
